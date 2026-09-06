@@ -434,11 +434,11 @@ function createPopupLayout() {
             <input type="number" id="${id}" class="text_pole textarea_compact wide100pMinFit" placeholder="${placeholder}" value="${value}" ${min !== null ? `min="${min}"` : ''}>
         </div>`;
 
-     // Helper to create text input HTML
-     const createTextInput = (id, label, placeholder = '', value = '', title = '') => `
-         <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
-             <label for="${id}" title="${title}">${label}:</label>
-             <input type="text" id="${id}" class="text_pole flex1" placeholder="${placeholder}" value="${value}">
+     // Helper to create text input HTML (label rendered above the input to save horizontal space)
+     const createTextInput = (id, label, placeholder = '', value = '', title = '', extra = '') => `
+         <div class="chub-search-field">
+             <label for="${id}" title="${title}">${label}${extra}</label>
+             <input type="text" id="${id}" class="text_pole" placeholder="${placeholder}" value="${value}">
          </div>`;
 
     return `
@@ -450,18 +450,12 @@ function createPopupLayout() {
     </div>
     <hr class="chub-hr">
     <div class="search-container chub-search-container">
-        <div class="chub-search-row">
-             ${createTextInput('characterSearchInput', '<i class="fas fa-search"></i>', 'Full-text search...', '', 'Search name, description, tags etc.')}
-        </div>
-        <div class="chub-search-row">
-            ${createTextInput('nameLikeInput', '<i class="fas fa-user"></i>', 'Name contains...', '', 'Search only character names')}
-        </div>
-        <div class="chub-search-row">
-            ${createTextInput('includeTags', '<i class="fas fa-plus-square"></i>', 'Include tags (comma separated)', '', 'Tags the character MUST have')}
-             ${createCheckbox('inclusiveOrCheckbox', 'OR', currentSettings.inclusive_or, 'If checked, match ANY included tag (OR). If unchecked, match ALL (AND).')}
-        </div>
-        <div class="chub-search-row">
-             ${createTextInput('excludeTags', '<i class="fas fa-minus-square"></i>', 'Exclude tags (comma separated)', '', 'Tags the character must NOT have')}
+        <div class="chub-search-grid">
+            ${createTextInput('characterSearchInput', '<i class="fas fa-search"></i> Full-text search', 'Search name, description, tags...', '', 'Search name, description, tags etc.')}
+            ${createTextInput('nameLikeInput', '<i class="fas fa-user"></i> Name contains', 'e.g. Aria', '', 'Search only character names')}
+            ${createTextInput('includeTags', '<i class="fas fa-plus-square"></i> Include tags', 'comma separated', '', 'Tags the character MUST have',
+                `<span class="chub-inline-checkbox"><input type="checkbox" id="inclusiveOrCheckbox" ${currentSettings.inclusive_or ? 'checked' : ''}><label for="inclusiveOrCheckbox" title="If checked, match ANY included tag (OR). If unchecked, match ALL (AND).">OR</label></span>`)}
+            ${createTextInput('excludeTags', '<i class="fas fa-minus-square"></i> Exclude tags', 'comma separated', '', 'Tags the character must NOT have')}
         </div>
 
         <details class="chub-details">
