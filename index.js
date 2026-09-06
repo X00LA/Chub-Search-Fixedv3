@@ -378,17 +378,17 @@ function generateCharacterListItem(character, index) {
     const placeholderImg = `${extensionFolderPath}placeholder.png`; // Define placeholder path
 
     return `
-        <div class="character-list-item chub-character-item" data-index="${index}">
-            <img class="thumbnail chub-thumbnail" src="${imageUrl}" onerror="this.onerror=null; this.src='${placeholderImg}';">
-            <div class="info chub-info">
-                <a href="https://chub.ai/characters/${character.fullPath}" target="_blank" title="View on Chub.ai: ${character.name}"><div class="name chub-name">${character.name || "Default Name"}</div></a>
+        <div class="chub-character-item" data-index="${index}">
+            <img class="chub-thumbnail" src="${imageUrl}" onerror="this.onerror=null; this.src='${placeholderImg}';">
+            <div class="chub-info">
+                <a href="https://chub.ai/characters/${character.fullPath}" target="_blank" title="View on Chub.ai: ${character.name}"><div class="chub-name">${character.name || "Default Name"}</div></a>
                 <a href="https://chub.ai/users/${character.author}" target="_blank" title="View author on Chub.ai: ${character.author}">
-                 <span class="author chub-author">by ${character.author}</span>
+                 <span class="chub-author">by ${character.author}</span>
                 </a>
-                <div class="description chub-description">${character.description}</div>
-                <div class="tags chub-tags">${character.tags.slice(0, 8).map(tag => `<span class="tag chub-tag">${tag}</span>`).join('')}</div>
+                <div class="chub-description">${character.description}</div>
+                <div class="chub-tags">${character.tags.slice(0, 8).map(tag => `<span class="chub-tag">${tag}</span>`).join('')}</div>
             </div>
-            <div data-path="${character.fullPath}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix chub-download-btn" title="Import Character"></div>
+            <div data-path="${character.fullPath}" class="menu_button fa-solid fa-cloud-arrow-down faSmallFontSquareFix chub-download-btn" title="Import Character"></div>
         </div>
     `;
 }
@@ -442,8 +442,8 @@ function createPopupLayout() {
          </div>`;
 
     return `
-<div class="list-and-search-wrapper chub-wrapper" id="list-and-search-wrapper">
-    <div class="character-list-popup chub-list-popup">
+<div class="chub-wrapper" id="list-and-search-wrapper">
+    <div class="chub-list-popup">
         ${chubCharacters.map((character, index) => generateCharacterListItem(character, index)).join('')}
         <!-- Placeholder message when list is empty -->
         ${chubCharacters.length === 0 ? '<div class="chub-no-characters-found">Perform a search to see characters.</div>' : ''}
@@ -879,36 +879,5 @@ jQuery(async () => {
 
     // Load settings
     await loadSettings(); // Ensure settings are loaded before the popup might be opened
-
-     // Add some basic CSS for layout if not done elsewhere
-     const css = `
-        .chub-wrapper { display: flex; flex-direction: column; height: 100%; max-height: 70vh; }
-        .chub-list-popup { flex-grow: 1; overflow-y: auto; border: 1px solid var(--border-color); padding: 5px; margin-bottom: 10px; background: var(--background-color); min-height: 150px; }
-        .chub-search-container { padding: 10px; border: 1px solid var(--border-color); overflow-y: auto; max-height: 40%; background: var(--settings-bg); }
-        .chub-search-row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
-        .chub-search-row label { min-width: 80px; text-align: right; }
-        .chub-details { border: 1px solid var(--border-color); margin-bottom: 10px; border-radius: 4px; }
-        .chub-summary { cursor: pointer; padding: 5px; background-color: var(--menu-button-bg); font-weight: bold; }
-        .chub-filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; padding: 10px; background-color: var(--settings-bg-hover); }
-        .chub-filter-item { background-color: transparent; } /* Override potential inherited styles */
-        .chub-filter-item label { min-width: fit-content; margin-right: 5px; }
-        .chub-character-item { display: flex; border-bottom: 1px solid var(--border-color); padding: 8px 5px; gap: 10px; background-color: var(--message-bot-bg); margin-bottom: 5px; border-radius: 3px; }
-        .chub-character-item:hover { background-color: var(--message-bot-bg-hover); }
-        .chub-thumbnail { width: 60px; height: 80px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
-        .chub-info { flex-grow: 1; display: flex; flex-direction: column; gap: 3px; }
-        .chub-name { font-weight: bold; color: var(--text-color-primary); }
-        .chub-author { font-size: 0.85em; color: var(--text-color-secondary); }
-        .chub-description { font-size: 0.9em; max-height: 3.6em; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--text-color-primary); }
-        .chub-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-        .chub-tag { background-color: var(--menu-button-bg); padding: 2px 5px; border-radius: 3px; font-size: 0.8em; }
-        .chub-download-btn { align-self: center; margin-left: 10px; }
-        .chub-no-characters-found { text-align: center; padding: 20px; color: var(--text-color-secondary); }
-        .chub-search-button { margin-top: 10px; width: 100%; text-align: center; padding: 8px; }
-        .list-and-search-wrapper .searching { opacity: 0.6; cursor: wait; pointer-events: none; }
-        .chub-zoomed-image { cursor: zoom-out; } /* Indicate the zoomed image can be clicked to close */
-        .wide100pMinFit { min-width: 100px; flex-grow: 1;} /* Util class for number inputs */
-        .textarea_compact.wide8pMinFit { width: 8ch; min-width: fit-content;} /* Adjust specific inputs */
-    `;
-     $('head').append(`<style>${css}</style>`);
 });
 

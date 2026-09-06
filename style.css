@@ -1,100 +1,236 @@
-.list-and-search-wrapper {
+/* ==========================================================================
+   CHub Search - popup layout
+   ========================================================================== */
+
+.chub-wrapper {
     display: flex;
     flex-direction: column;
-    height: 100%;  /* Adjust as needed. If this is a popup, it might be set to a fixed height. */
+    height: 100%;
+    min-height: 0; /* allow children to shrink and scroll instead of overflowing */
 }
 
-.character-list-popup {
-    flex-grow: 1;
-    overflow-y: auto;  /* This ensures that if the list grows too long, it becomes scrollable. */
+/* --------------------------------------------------------------------
+   Character list
+   -------------------------------------------------------------------- */
+
+.chub-list-popup {
+    flex: 1 1 auto;
+    min-height: 150px;
+    overflow-y: auto;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    padding: 5px;
+    margin-bottom: 10px;
+    background: rgba(0, 0, 0, 0.15);
 }
 
+.chub-list-popup.searching {
+    filter: grayscale(100%);
+    opacity: 0.6;
+    pointer-events: none;
+}
 
-.character-list-item {
+.chub-no-characters-found {
+    text-align: center;
+    padding: 20px;
+    color: var(--SmartThemeEmColor);
+}
+
+.chub-character-item {
     display: flex;
-    align-items: center;  /* aligns items vertically in the middle */
-    margin: 10px 0;      /* space between each list item */
-    justify-content: space-between;  /* pushes content to the far edges */
-    max-width: 80vw;
-}
-
-.character-list-item img.thumbnail {
-    flex: 0 0 100px; /* this gives a fixed width of 100px to thumbnails, adjust as needed */
-    height: 100px;  /* adjust height as needed */
-    object-fit: cover;
-    margin-right: 10px; /* space between thumbnail and description */
-}
-
-body img.thumbnail {
-    width: 100px;  /* adjust width as needed */
-    height: 100px;  /* adjust height as needed */
-    object-fit: cover;
-    margin-right: 10px; /* space between thumbnail and description */
-}
-
-.character-list-item .info {
-    flex: 1;  /* allows the description to take up the rest of the space */
-    text-align: left;  /* aligns content to the left */
-    overflow: hidden;  /* in case of long text */
-}
-
-
-.character-list-item .info .name {
-    font-weight: bold;  /* Makes the name stand out */
+    align-items: flex-start;
+    gap: 10px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    padding: 8px 5px;
     margin-bottom: 5px;
-    text-align: left;  /* aligns content to the left */
-    /* don't change the color due to it being a link */
-    color: var(--SmartThemeBodyColor)
+    border-radius: 3px;
 }
 
-.character-list-item .info .name a{
-    color: var(--SmartThemeBodyColor)
+.chub-character-item:hover {
+    background-color: rgba(255, 255, 255, 0.05);
 }
 
-.character-list-item .info .description {
-    color: #666;  /*Darkens the description text slightly*/
-    white-space: normal; /*Allows descriptions to wrap to multiple lines*/
+.chub-thumbnail {
+    flex: 0 0 70px;
+    width: 70px;
+    height: 90px;
+    object-fit: cover;
+    border-radius: 4px;
+    cursor: zoom-in;
+}
+
+.chub-info {
+    flex: 1 1 auto;
+    min-width: 0; /* required for text-overflow to work inside a flex child */
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    text-align: left;
+}
+
+.chub-name {
+    font-weight: bold;
+    color: var(--SmartThemeBodyColor);
     overflow: hidden;
-    text-overflow: ellipsis;  /*Ensures that long descriptions end in an ellipsis*/
-    text-align: left;  /*aligns content to the left*/
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-.character-list-item .info .tags{
-    margin-top: 10px;
+.chub-author {
+    font-size: 0.85em;
+    color: var(--SmartThemeEmColor);
 }
 
-.character-list-item .info .author {
-    font-size: 0.8em; /* This makes the author text 80% of its original size. Adjust as needed. */
-    color: var(--SmartThemeEmColor)
+.chub-description {
+    font-size: 0.9em;
+    color: var(--SmartThemeBodyColor);
+    max-height: 2.7em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
 
+.chub-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+}
+
+.chub-tag {
+    background-color: var(--black30a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.75em;
+    color: var(--SmartThemeBodyColor);
+}
+
+.chub-download-btn {
+    flex: 0 0 auto;
+    align-self: center;
+    width: 2.5em;
+    height: 2.5em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.chub-zoomed-image {
+    cursor: zoom-out;
+}
+
+/* --------------------------------------------------------------------
+   Search / filter form
+   -------------------------------------------------------------------- */
+
+.chub-hr {
+    margin: 0 0 10px 0;
+    border-color: var(--SmartThemeBorderColor);
+}
+
+.chub-search-container {
+    flex: 0 0 auto;
+    max-height: 45%;
+    overflow-y: auto;
+    padding: 10px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.chub-search-row {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.chub-search-row .flex1 {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+}
+
+.chub-search-row label {
+    flex: 0 0 auto;
+    min-width: 1.5em;
+    text-align: center;
+}
+
+.chub-details {
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 4px;
+    margin-bottom: 10px;
+}
+
+.chub-summary {
+    cursor: pointer;
+    padding: 6px 8px;
+    font-weight: bold;
+}
+
+.chub-filter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 8px 14px;
+    padding: 10px;
+    align-items: center;
+}
+
+.chub-filter-item {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
+    min-width: 0;
+}
+
+.chub-filter-item label {
+    flex: 0 1 auto;
+    min-width: 0;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chub-filter-item input[type="number"] {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 8em;
+}
+
+.chub-filter-item input[type="text"] {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.chub-filter-item input[type="checkbox"] {
+    flex: 0 0 auto;
+    margin: 0;
 }
 
 .page-buttons {
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-top: 10px;
+    gap: 8px;
+    margin-top: 4px;
 }
 
 .page-buttons input#pageNumber {
-    width: 100px; /*Reduce the width of the page number input*/
-    text-align: center; /*Center-align the input text*/
-    padding: 0; /*Remove any extra padding to ensure compact size*/
+    width: 5em;
+    text-align: center;
 }
 
-.list-and-search-wrapper .flex-container {
-    display: flex;
+.chub-search-button {
+    margin-top: 10px;
+    width: 100%;
+    text-align: center;
+    padding: 8px;
 }
-
-.list-and-search-wrapper .flex-align-center {
-    align-items: center;
-}
-
-/* Centering labels in relation to adjacent inputs or icons */
-.list-and-search-wrapper .flex-container label {
-    align-self: center;
-}
-/* Grey out the entire list when searching */
-.searching {
-    filter: grayscale(100%);
-    }
