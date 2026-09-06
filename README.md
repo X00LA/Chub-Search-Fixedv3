@@ -27,6 +27,23 @@ To update the search results, click "Search"
 
 This extension requires >= SillyTavern commit [01e38be](https://github.com/SillyTavern/SillyTavern/commit/01e38be408b4bd40792c3cf86d353ecad60f7ea2) to function.
 
+## Character Tavern support
+
+Besides Chub, this extension can also search and import characters from [Character Tavern](https://character-tavern.com/) via a second tab in the search popup.
+
+Character Tavern's API does not send CORS headers, so the browser blocks direct requests to it. To work around this, Character Tavern searches and imports are routed through SillyTavern's built-in CORS proxy. This proxy is **disabled by default**, so it needs to be enabled once:
+
+- In `config.yaml`, set:
+  ```yaml
+  enableCorsProxy: true
+  ```
+  or start SillyTavern with the `--corsProxy` command line flag.
+- Restart the SillyTavern server after changing this setting.
+
+If the proxy is not enabled, searching or importing from Character Tavern will show a toast error explaining that `enableCorsProxy` needs to be turned on. The Chub tab is unaffected and works without this setting.
+
+Note: Character Tavern's API is undocumented and was reverse-engineered from the site's own JavaScript bundles. It may break if Character Tavern changes their API.
+
 ## Support and Contributions
 
 If you encounter any issues while using this extension, please file an issue on GitHub. If you'd like to contribute to this project, feel free to fork the repository and submit a pull request.

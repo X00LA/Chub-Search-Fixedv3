@@ -16,6 +16,33 @@ const API_ENDPOINT_SEARCH = "https://inference.chub.ai/search"; // Use the chara
 // Or use the generic search endpoint if needed: const API_ENDPOINT_SEARCH = "https://api.chub.ai/api/search";
 const API_ENDPOINT_DOWNLOAD = "https://api.chub.ai/api/characters/download";
 
+// Character Tavern endpoints (undocumented, reverse-engineered from the site's JS bundles).
+// character-tavern.com does not send CORS headers, so browser-side fetches to it are blocked.
+// We route requests through SillyTavern's built-in CORS proxy (/proxy/<url>), which requires
+// the server to be started with --corsProxy or "enableCorsProxy: true" in config.yaml.
+const CT_API_SEARCH = "https://character-tavern.com/api/search/cards";
+const CT_API_CHARACTER = "https://character-tavern.com/api/character";
+const CT_IMAGE_BASE = "https://ct-cards.storage.character-tavern.com";
+
+/**
+ * Fetches a URL through SillyTavern's CORS proxy, since character-tavern.com does not
+ * allow direct cross-origin requests from the browser.
+ * @param {string} url - The absolute URL to fetch.
+ * @param {RequestInit} [options] - Standard fetch options.
+ * @returns {Promise<Response>}
+ */
+async function ctFetch(url, options = {}) {
+    // The full target URL (including its own query string) must be encoded as a single
+    // path segment, otherwise Express splits off anything after "?" as the proxy
+    // request's own query string and it never reaches the target URL.
+    const proxyUrl = `/proxy/${encodeURIComponent(url)}`;
+    const response = await fetch(proxyUrl, options);
+    if (response.status === 404) {
+        throw new Error('CORS_PROXY_DISABLED');
+    }
+    return response;
+}
+
 const defaultSettings = {
     findCount: 30, // Corresponds to 'first'
     nsfw: false,
@@ -35,6 +62,8 @@ const defaultSettings = {
 };
 
 let chubCharacters = [];
+let ctCharacters = [];
+let activeSource = 'chub'; // 'chub' or 'ct'
 let characterListContainer = null;  // A global variable to hold the reference
 let popupState = null;
 let savedPopupContent = null;
@@ -111,12 +140,75 @@ async function downloadCharacter(input) {
 }
 
 /**
+ * Downloads a character from Character Tavern and imports it into SillyTavern.
+ * Character Tavern has no ready-made PNG/download endpoint like Chub, so we fetch
+ * the raw card fields via its API and assemble a Character Card V2 JSON file ourselves.
+ * @param {string} id - The Character Tavern card id (e.g. "CT_xxxx...").
+ * @param {string} path - The "author/char_name" path, used for the API and image lookup.
+ * @returns {Promise<void>}
+ */
+async function downloadCTCharacter(id, path) {
+    console.debug('Character Tavern import started', id, path);
+    try {
+        const [author, charName] = path.split('/');
+        const [detailRes, tagsRes, greetingsRes] = await Promise.all([
+            ctFetch(`${CT_API_CHARACTER}/${encodeURIComponent(author)}/${encodeURIComponent(charName)}`),
+            ctFetch(`${CT_API_CHARACTER}/${encodeURIComponent(id)}/tags`),
+            ctFetch(`${CT_API_CHARACTER}/${encodeURIComponent(id)}/alternative-greetings`),
+        ]);
+
+        if (!detailRes.ok) {
+            throw new Error(`Character detail request failed: ${detailRes.status}`);
+        }
+
+        const { card } = await detailRes.json();
+        const tags = tagsRes.ok ? await tagsRes.json() : [];
+        const alternateGreetings = greetingsRes.ok ? await greetingsRes.json() : [];
+
+        const cardV2 = {
+            spec: 'chara_card_v2',
+            spec_version: '2.0',
+            data: {
+                name: card.name || charName,
+                description: card.definition_character_description || '',
+                personality: card.definition_personality || '',
+                scenario: card.definition_scenario || '',
+                first_mes: card.definition_first_message || '',
+                mes_example: card.definition_example_messages || '',
+                creator_notes: card.tagline || '',
+                system_prompt: card.definition_system_prompt || '',
+                post_history_instructions: card.definition_post_history_prompt || '',
+                alternate_greetings: Array.isArray(alternateGreetings) ? alternateGreetings : [],
+                tags: Array.isArray(tags) ? tags : [],
+                creator: author || '',
+                character_version: '',
+                extensions: {},
+            },
+        };
+
+        const jsonBlob = new Blob([JSON.stringify(cardV2)], { type: 'application/json' });
+        const jsonFile = new File([jsonBlob], `${cardV2.data.name}.json`, { type: 'application/json' });
+
+        await processDroppedFiles([jsonFile]);
+        toastr.success(`Imported "${cardV2.data.name}" from Character Tavern.`);
+    } catch (error) {
+        console.error('Character Tavern import failed', error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use Character Tavern.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.info("Click to go to the character page", 'Character Tavern import failed', { onclick: () => window.open(`https://character-tavern.com/character/${path}`, '_blank') });
+        }
+    }
+}
+
+/**
  * Updates the character list in the view based on provided characters.
  * @param {Array} characters - A list of character data objects to be rendered in the view.
+ * @param {string} source - Which source the characters came from ('chub' or 'ct').
  */
-function updateCharacterListInView(characters) {
+function updateCharacterListInView(characters, source) {
     if (characterListContainer) {
-        characterListContainer.innerHTML = characters.map(generateCharacterListItem).join('');
+        characterListContainer.innerHTML = characters.map((character, index) => generateCharacterListItem(character, index, source)).join('');
     }
 }
 
@@ -311,13 +403,77 @@ async function fetchCharactersBySearch(options) {
     }
 }
 
+/**
+ * Fetches characters from Character Tavern based on specified search criteria.
+ * @param {Object} options - Search options: searchTerm, includeTags, excludeTags, min_tokens, max_tokens,
+ *                            require_lore (hasLorebook), require_oc (isOC), sort, page, first.
+ * @returns {Promise<Array>} - Resolves with an array of normalized character objects.
+ */
+async function fetchCTCharactersBySearch(options) {
+    const params = new URLSearchParams();
+
+    if (options.searchTerm) params.set('query', options.searchTerm);
+    params.set('sort', options.sort || 'most_popular');
+    params.set('page', String(options.page || 1));
+    params.set('limit', String(options.first || extension_settings.chub.findCount || 30));
+    if (Array.isArray(options.includeTags) && options.includeTags.length > 0) {
+        params.set('tags', options.includeTags.join(','));
+    }
+    if (Array.isArray(options.excludeTags) && options.excludeTags.length > 0) {
+        params.set('exclude_tags', options.excludeTags.join(','));
+    }
+    if (options.min_tokens) params.set('minimum_tokens', String(options.min_tokens));
+    if (options.max_tokens) params.set('maximum_tokens', String(options.max_tokens));
+    if (options.require_lore) params.set('hasLorebook', 'true');
+    if (options.require_oc) params.set('isOC', 'true');
+
+    const url = `${CT_API_SEARCH}?${params.toString()}`;
+    console.log("Fetching Character Tavern:", url);
+
+    try {
+        const searchResponse = await ctFetch(url, { headers: { 'Accept': 'application/json' } });
+
+        if (!searchResponse.ok) {
+            console.error('Character Tavern API request failed:', searchResponse.status, searchResponse.statusText);
+            toastr.error(`Character Tavern search failed: ${searchResponse.statusText}`, "API Error");
+            return [];
+        }
+
+        const searchData = await searchResponse.json();
+        const hits = searchData.hits || [];
+
+        ctCharacters = hits.map(hit => ({
+            url: `${CT_IMAGE_BASE}/${hit.path}.png?width=256&quality=80&format=auto`,
+            description: hit.tagline || "No description.",
+            name: hit.name || "Unnamed Character",
+            fullPath: hit.path,
+            id: hit.id,
+            tags: [], // Not included in search results; fetched on demand only when importing
+            author: hit.author || "Unknown Author",
+            downloads: hit.downloads,
+            likes: hit.likes,
+        }));
+
+        return ctCharacters;
+
+    } catch (error) {
+        console.error("Error during Character Tavern search fetch:", error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use Character Tavern.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.error("An error occurred while searching Character Tavern.", "Fetch Error");
+        }
+        return [];
+    }
+}
+
 
 /**
  * Searches for characters based on the provided options and manages the UI during the search.
  * @param {Object} options - The search criteria/options for fetching characters.
  * @returns {Promise<Array>} - Resolves with an array of character objects that match the search criteria.
  */
-async function searchCharacters(options) {
+async function searchCharacters(options, source) {
     if (characterListContainer && !document.body.contains(characterListContainer)) {
         console.log('Character list container is not in the DOM, removing reference');
         characterListContainer = null;
@@ -327,7 +483,7 @@ async function searchCharacters(options) {
         characterListContainer.classList.add('searching');
     }
     console.log('Searching for characters with options:', options);
-    const characters = await fetchCharactersBySearch(options);
+    const characters = source === 'ct' ? await fetchCTCharactersBySearch(options) : await fetchCharactersBySearch(options);
     if (characterListContainer) {
         characterListContainer.classList.remove('searching');
     }
@@ -345,18 +501,23 @@ function openSearchPopup() {
 /**
  * Executes a character search based on provided options and updates the view with the results.
  * @param {Object} options - The search criteria/options for fetching characters.
+ * @param {string} source - Which source to search ('chub' or 'ct').
  * @returns {Promise<void>} - Resolves once the character list has been updated in the view.
  */
-async function executeCharacterSearch(options) {
+async function executeCharacterSearch(options, source) {
     // Clear the previous search result first
-    chubCharacters = [];
-    updateCharacterListInView(chubCharacters);  // Resetting character list before fetching new characters
+    updateCharacterListInView([], source);  // Resetting character list before fetching new characters
 
-    let characters  = await searchCharacters(options);
+    let characters = await searchCharacters(options, source);
+
+    // Bail out if the user switched tabs while this search was in flight
+    if (source !== activeSource) {
+        return;
+    }
 
     if (characters && characters.length > 0) {
         console.log(`Found ${characters.length} characters. Updating character list.`);
-        updateCharacterListInView(characters);
+        updateCharacterListInView(characters, source);
     } else {
         console.log('No characters found');
         if (characterListContainer) { // Ensure container exists before modifying
@@ -370,25 +531,37 @@ async function executeCharacterSearch(options) {
  * Generates the HTML structure for a character list item.
  * @param {Object} character - The character data object with properties like url, name, description, tags, and author.
  * @param {number} index - The index of the character in the list.
+ * @param {string} source - Which source this character came from ('chub' or 'ct'), used for links and the download button.
  * @returns {string} - Returns an HTML string representation of the character list item.
  */
-function generateCharacterListItem(character, index) {
+function generateCharacterListItem(character, index, source = 'chub') {
     // Use a placeholder if the image URL is invalid or missing
     const imageUrl = character.url && character.url !== `${extensionFolderPath}placeholder.png` ? character.url : `${extensionFolderPath}placeholder.png`;
     const placeholderImg = `${extensionFolderPath}placeholder.png`; // Define placeholder path
+
+    const characterPageUrl = source === 'ct'
+        ? `https://character-tavern.com/character/${character.fullPath}`
+        : `https://chub.ai/characters/${character.fullPath}`;
+    const authorPageUrl = source === 'ct'
+        ? `https://character-tavern.com/creator/${character.author}`
+        : `https://chub.ai/users/${character.author}`;
+    const siteLabel = source === 'ct' ? 'Character Tavern' : 'Chub.ai';
+    const downloadAttrs = source === 'ct'
+        ? `data-source="ct" data-id="${character.id}" data-path="${character.fullPath}"`
+        : `data-source="chub" data-path="${character.fullPath}"`;
 
     return `
         <div class="chub-character-item" data-index="${index}">
             <img class="chub-thumbnail" src="${imageUrl}" onerror="this.onerror=null; this.src='${placeholderImg}';">
             <div class="chub-info">
-                <a href="https://chub.ai/characters/${character.fullPath}" target="_blank" title="View on Chub.ai: ${character.name}"><div class="chub-name">${character.name || "Default Name"}</div></a>
-                <a href="https://chub.ai/users/${character.author}" target="_blank" title="View author on Chub.ai: ${character.author}">
+                <a href="${characterPageUrl}" target="_blank" title="View on ${siteLabel}: ${character.name}"><div class="chub-name">${character.name || "Default Name"}</div></a>
+                <a href="${authorPageUrl}" target="_blank" title="View author on ${siteLabel}: ${character.author}">
                  <span class="chub-author">by ${character.author}</span>
                 </a>
                 <div class="chub-description">${character.description}</div>
                 <div class="chub-tags">${character.tags.slice(0, 8).map(tag => `<span class="chub-tag">${tag}</span>`).join('')}</div>
             </div>
-            <div data-path="${character.fullPath}" class="menu_button fa-solid fa-cloud-arrow-down faSmallFontSquareFix chub-download-btn" title="Import Character"></div>
+            <div ${downloadAttrs} class="menu_button fa-solid fa-cloud-arrow-down faSmallFontSquareFix chub-download-btn" title="Import Character"></div>
         </div>
     `;
 }
@@ -441,14 +614,32 @@ function createPopupLayout() {
              <input type="text" id="${id}" class="text_pole" placeholder="${placeholder}" value="${value}">
          </div>`;
 
+    const ctReadableSortOptions = {
+        "most_popular": "Most Popular",
+        "trending": "Trending",
+        "newest": "Newest",
+        "oldest": "Oldest",
+        "most_liked": "Most Liked",
+        "most_chatted": "Most Chatted",
+    };
+
+    const chubTab = activeSource === 'chub';
+    const ctTab = activeSource === 'ct';
+
     return `
 <div class="chub-wrapper" id="list-and-search-wrapper">
+    <div class="chub-source-tabs">
+        <div class="chub-source-tab${chubTab ? ' active' : ''}" data-source-tab="chub">Chub</div>
+        <div class="chub-source-tab${ctTab ? ' active' : ''}" data-source-tab="ct">Character Tavern</div>
+    </div>
     <div class="chub-list-popup">
-        ${chubCharacters.map((character, index) => generateCharacterListItem(character, index)).join('')}
+        ${(activeSource === 'ct' ? ctCharacters : chubCharacters).map((character, index) => generateCharacterListItem(character, index, activeSource)).join('')}
         <!-- Placeholder message when list is empty -->
-        ${chubCharacters.length === 0 ? '<div class="chub-no-characters-found">Perform a search to see characters.</div>' : ''}
+        ${(activeSource === 'ct' ? ctCharacters : chubCharacters).length === 0 ? '<div class="chub-no-characters-found">Perform a search to see characters.</div>' : ''}
     </div>
     <hr class="chub-hr">
+
+    <div class="chub-source-panel" data-source-panel="chub"${chubTab ? '' : ' hidden'}>
     <div class="search-container chub-search-container">
         <div class="chub-search-grid">
             ${createTextInput('characterSearchInput', '<i class="fas fa-search"></i> Full-text search', 'Search name, description, tags...', '', 'Search name, description, tags etc.')}
@@ -505,6 +696,47 @@ function createPopupLayout() {
                 <div class="menu_button chub-search-button" id="characterSearchButton"><i class="fas fa-search"></i> Search</div>
             </div>
         </div>
+    </div>
+    </div>
+
+    <div class="chub-source-panel" data-source-panel="ct"${ctTab ? '' : ' hidden'}>
+    <div class="search-container chub-search-container">
+        <div class="chub-search-grid">
+            ${createTextInput('ctSearchInput', '<i class="fas fa-search"></i> Search', 'Search name, tagline...', '', 'Full-text search across name and tagline')}
+            ${createTextInput('ctIncludeTags', '<i class="fas fa-plus-square"></i> Include tags', 'comma separated', '', 'Tags the character MUST have')}
+            ${createTextInput('ctExcludeTags', '<i class="fas fa-minus-square"></i> Exclude tags', 'comma separated', '', 'Tags the character must NOT have')}
+        </div>
+
+        <details class="chub-details">
+            <summary class="chub-summary">Filters & Requirements</summary>
+            <div class="chub-filter-grid">
+                ${createNumberInput('ctMinTokensInput', 'Min Tokens', 'e.g., 100', '', 0, 'Minimum character definition tokens')}
+                ${createNumberInput('ctMaxTokensInput', 'Max Tokens', 'e.g., 4000', '', 0, 'Maximum character definition tokens')}
+                ${createCheckbox('ctRequireLoreCheckbox', 'Need Lorebook', false, 'Require characters to have a lorebook')}
+                ${createCheckbox('ctRequireOcCheckbox', 'Original Character', false, 'Only show characters marked as original characters (OC)')}
+            </div>
+        </details>
+
+        <div class="chub-toolbar">
+            <div class="chub-toolbar-section chub-sort-controls">
+                <label for="ctSortOrder">Sort:</label>
+                <select class="margin0" id="ctSortOrder">
+                    ${Object.entries(ctReadableSortOptions).map(([key, value]) => `<option value="${key}">${value}</option>`).join('')}
+                </select>
+                <label for="ctResultsPerPage">Per Page:</label>
+                <input type="number" id="ctResultsPerPage" class="text_pole textarea_compact" min="1" max="100" value="${currentSettings.findCount || 30}">
+            </div>
+            <div class="chub-toolbar-section page-buttons">
+                <button class="menu_button" id="ctPageDownButton" title="Previous Page"><i class="fas fa-chevron-left"></i></button>
+                <label for="ctPageNumber">Page:</label>
+                <input type="number" id="ctPageNumber" class="text_pole textarea_compact" min="1" value="1">
+                <button class="menu_button" id="ctPageUpButton" title="Next Page"><i class="fas fa-chevron-right"></i></button>
+            </div>
+            <div class="chub-toolbar-section chub-toolbar-search">
+                <div class="menu_button chub-search-button" id="ctSearchButton"><i class="fas fa-search"></i> Search</div>
+            </div>
+        </div>
+    </div>
     </div>
 </div>
 `;
@@ -601,12 +833,18 @@ async function displayCharactersInListViewPopup() {
         else if (event.target.classList.contains('chub-download-btn')) {
             event.stopPropagation(); // Prevent triggering other listeners
             const fullPath = event.target.getAttribute('data-path');
-            if (fullPath) {
-                 downloadCharacter(fullPath);
-             } else {
-                 console.error("Download button missing data-path attribute");
-                 toastr.warning("Could not initiate download: character path missing.");
-             }
+            const source = event.target.getAttribute('data-source') || 'chub';
+            if (!fullPath) {
+                console.error("Download button missing data-path attribute");
+                toastr.warning("Could not initiate download: character path missing.");
+                return;
+            }
+            if (source === 'ct') {
+                const id = event.target.getAttribute('data-id');
+                downloadCTCharacter(id, fullPath);
+            } else {
+                downloadCharacter(fullPath);
+            }
         }
     });
 
@@ -627,7 +865,28 @@ async function displayCharactersInListViewPopup() {
      }
 
 
-    const executeCharacterSearchDebounced = debounce((options) => executeCharacterSearch(options), 600); // Slightly shorter debounce
+    const executeCharacterSearchDebounced = debounce((options, source) => executeCharacterSearch(options, source), 600); // Slightly shorter debounce
+
+    // --- Tab switching ---
+    const tabButtons = document.querySelectorAll('[data-source-tab]');
+    tabButtons.forEach(tabButton => {
+        tabButton.addEventListener('click', () => {
+            const newSource = tabButton.getAttribute('data-source-tab');
+            if (newSource === activeSource) return;
+            activeSource = newSource;
+
+            tabButtons.forEach(btn => btn.classList.toggle('active', btn === tabButton));
+            document.querySelectorAll('[data-source-panel]').forEach(panel => {
+                panel.hidden = panel.getAttribute('data-source-panel') !== newSource;
+            });
+
+            const currentCharacters = newSource === 'ct' ? ctCharacters : chubCharacters;
+            updateCharacterListInView(currentCharacters, newSource);
+            if (currentCharacters.length === 0 && characterListContainer) {
+                characterListContainer.innerHTML = '<div class="chub-no-characters-found">Perform a search to see characters.</div>';
+            }
+        });
+    });
 
     // --- Event Listeners for Search Inputs ---
     const searchInputs = [
@@ -729,7 +988,7 @@ async function displayCharactersInListViewPopup() {
         }
 
 
-        executeCharacterSearchDebounced(options);
+        executeCharacterSearchDebounced(options, 'chub');
 
          // Update settings in real-time for boolean flags and resultsPerPage
         if (document.getElementById('resultsPerPage') && options.first) {
@@ -791,6 +1050,102 @@ async function displayCharactersInListViewPopup() {
     if (searchButton) searchButton.addEventListener('click', handleSearch);
     if (pageUpButton) pageUpButton.addEventListener('click', handleSearch);
     if (pageDownButton) pageDownButton.addEventListener('click', handleSearch);
+
+    // --- Character Tavern search inputs ---
+    const ctSearchInputs = [
+        'ctSearchInput', 'ctIncludeTags', 'ctExcludeTags', 'ctMinTokensInput', 'ctMaxTokensInput',
+        'ctRequireLoreCheckbox', 'ctRequireOcCheckbox', 'ctSortOrder', 'ctResultsPerPage', 'ctPageNumber',
+    ];
+
+    const ctSearchButton = document.getElementById('ctSearchButton');
+    const ctPageUpButton = document.getElementById('ctPageUpButton');
+    const ctPageDownButton = document.getElementById('ctPageDownButton');
+
+    const handleCTSearch = async function (e) {
+        console.debug('handleCTSearch triggered by:', e.target.id || e.type);
+
+        if (e.type === 'keyup' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+        if (e.type === 'keydown' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+
+        const getVal = (id) => document.getElementById(id)?.value;
+        const getChecked = (id) => document.getElementById(id)?.checked;
+        const getInt = (id) => {
+            const val = getVal(id);
+            return val ? parseInt(val, 10) : null;
+        };
+        const splitAndTrim = (id) => {
+            const str = getVal(id);
+            if (!str) return [];
+            return str.split(',').map(tag => tag.trim()).filter(tag => tag);
+        };
+
+        let currentPage = getInt('ctPageNumber') || 1;
+
+        if (e.target.id === 'ctPageUpButton' || e.target.closest('#ctPageUpButton')) {
+            currentPage++;
+        } else if (e.target.id === 'ctPageDownButton' || e.target.closest('#ctPageDownButton')) {
+            currentPage--;
+        }
+
+        currentPage = clamp(currentPage, 1, Number.MAX_SAFE_INTEGER);
+        if (document.getElementById('ctPageNumber')) {
+            document.getElementById('ctPageNumber').value = currentPage;
+        }
+
+        const options = {
+            searchTerm: getVal('ctSearchInput'),
+            includeTags: splitAndTrim('ctIncludeTags'),
+            excludeTags: splitAndTrim('ctExcludeTags'),
+            min_tokens: getInt('ctMinTokensInput'),
+            max_tokens: getInt('ctMaxTokensInput'),
+            require_lore: getChecked('ctRequireLoreCheckbox'),
+            require_oc: getChecked('ctRequireOcCheckbox'),
+            sort: getVal('ctSortOrder'),
+            first: getInt('ctResultsPerPage'),
+            page: currentPage,
+        };
+
+        if (e.target.id !== 'ctPageNumber' && e.target.id !== 'ctPageUpButton' && e.target.id !== 'ctPageDownButton' && !e.target.closest('#ctPageUpButton') && !e.target.closest('#ctPageDownButton')) {
+            options.page = 1;
+            if (document.getElementById('ctPageNumber')) {
+                document.getElementById('ctPageNumber').value = 1;
+            }
+        }
+
+        executeCharacterSearchDebounced(options, 'ct');
+
+        if (document.getElementById('ctResultsPerPage') && options.first) {
+            extension_settings.chub.findCount = options.first;
+        }
+    };
+
+    ctSearchInputs.forEach(inputId => {
+        const element = document.getElementById(inputId);
+        if (element) {
+            const eventType = (element.type === 'checkbox' || element.tagName === 'SELECT') ? 'change' : 'keyup';
+            element.addEventListener(eventType, handleCTSearch);
+            if (element.type === 'number') {
+                element.addEventListener('change', handleCTSearch);
+            }
+            if (element.type === 'text') {
+                element.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        handleCTSearch(e);
+                    }
+                });
+            }
+        } else {
+            console.warn(`Element with ID ${inputId} not found for event listener.`);
+        }
+    });
+
+    if (ctSearchButton) ctSearchButton.addEventListener('click', handleCTSearch);
+    if (ctPageUpButton) ctPageUpButton.addEventListener('click', handleCTSearch);
+    if (ctPageDownButton) ctPageDownButton.addEventListener('click', handleCTSearch);
 
     // Trigger initial search if desired (optional)
     // handleSearch({ target: { id: 'initial-load' } }); // Uncomment to search on open

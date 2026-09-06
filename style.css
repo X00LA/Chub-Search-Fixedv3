@@ -10,6 +10,52 @@
 }
 
 /* --------------------------------------------------------------------
+   Source tabs (Chub / Character Tavern)
+   -------------------------------------------------------------------- */
+
+.chub-source-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    flex: 0 0 auto;
+}
+
+.chub-source-tab {
+    padding: 6px 16px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    color: var(--SmartThemeEmColor);
+    background: transparent;
+}
+
+.chub-source-tab:hover {
+    color: var(--SmartThemeBodyColor);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.chub-source-tab.active {
+    color: var(--SmartThemeBodyColor);
+    font-weight: bold;
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--SmartThemeBorderColor);
+    margin-bottom: -1px;
+}
+
+.chub-source-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 0 0 auto;
+}
+
+.chub-source-panel[hidden] {
+    display: none;
+}
+
+/* --------------------------------------------------------------------
    Character list
    -------------------------------------------------------------------- */
 
@@ -133,7 +179,7 @@
 
 .chub-search-container {
     flex: 0 0 auto;
-    max-height: 45%;
+    max-height: 42vh;
     overflow-y: auto;
     padding: 10px;
     border: 1px solid var(--SmartThemeBorderColor);
