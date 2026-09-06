@@ -484,33 +484,27 @@ function createPopupLayout() {
                  ${createTextInput('languageInput', 'Language', 'e.g., en, ja', '', 'Filter by language code (ISO 639-1)')}
                 </div>
         </details>
-         <details class="chub-details">
-             <summary class="chub-summary">Sorting & Pagination</summary>
-             <div class="chub-filter-grid">
-                <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
-                    <label for="sortOrder">Sort By:</label>
-                    <select class="margin0" id="sortOrder">
-                        ${Object.entries(readableSortOptions).map(([key, value]) => `<option value="${key}">${value}</option>`).join('')}
-                    </select>
-                </div>
-                 <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
-                    <label for="sortAscCheckbox">Ascending:</label>
-                    <input type="checkbox" id="sortAscCheckbox">
-                </div>
-                 <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
-                    <label for="resultsPerPage">Per Page:</label>
-                    <input type="number" id="resultsPerPage" class="text_pole textarea_compact wide8pMinFit" min="1" max="100" value="${currentSettings.findCount || 30}">
-                 </div>
-                <div class="page-buttons flex-container flex-no-wrap flex-align-center chub-filter-item">
-                    <button class="menu_button" id="pageDownButton" title="Previous Page"><i class="fas fa-chevron-left"></i></button>
-                    <label for="pageNumber">Page:</label>
-                    <input type="number" id="pageNumber" class="text_pole textarea_compact wide8pMinFit" min="1" value="1">
-                    <button class="menu_button" id="pageUpButton" title="Next Page"><i class="fas fa-chevron-right"></i></button>
-                </div>
-            </div>
-        </details>
 
-        <div class="menu_button chub-search-button" id="characterSearchButton"><i class="fas fa-search"></i> Search</div>
+        <div class="chub-toolbar">
+            <div class="chub-toolbar-section chub-sort-controls">
+                <label for="sortOrder">Sort:</label>
+                <select class="margin0" id="sortOrder">
+                    ${Object.entries(readableSortOptions).map(([key, value]) => `<option value="${key}">${value}</option>`).join('')}
+                </select>
+                <label for="sortAscCheckbox" title="Sort ascending instead of descending"><input type="checkbox" id="sortAscCheckbox"> Asc</label>
+                <label for="resultsPerPage">Per Page:</label>
+                <input type="number" id="resultsPerPage" class="text_pole textarea_compact" min="1" max="100" value="${currentSettings.findCount || 30}">
+            </div>
+            <div class="chub-toolbar-section page-buttons">
+                <button class="menu_button" id="pageDownButton" title="Previous Page"><i class="fas fa-chevron-left"></i></button>
+                <label for="pageNumber">Page:</label>
+                <input type="number" id="pageNumber" class="text_pole textarea_compact" min="1" value="1">
+                <button class="menu_button" id="pageUpButton" title="Next Page"><i class="fas fa-chevron-right"></i></button>
+            </div>
+            <div class="chub-toolbar-section chub-toolbar-search">
+                <div class="menu_button chub-search-button" id="characterSearchButton"><i class="fas fa-search"></i> Search</div>
+            </div>
+        </div>
     </div>
 </div>
 `;
