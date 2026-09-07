@@ -907,17 +907,25 @@ async function fetchCVCharactersBySearch(options) {
         const searchData = await searchResponse.json();
         const cards = searchData.results || [];
 
-        cvCharacters = cards.map(card => ({
-            url: `${CV_FILE_BASE}/cards/${card.folder}/${card.file}`,
-            description: card.description_preview || card.first_mes_preview || "No description.",
-            name: card.name || "Unnamed Character",
-            folder: card.folder,
-            file: card.file,
-            tags: Array.isArray(card.tags) ? card.tags : [],
-            author: card.creator || "Unknown Author",
-            avgRating: card.avg_rating,
-            ratingCount: card.rating_count,
-        }));
+        cvCharacters = cards.map(card => {
+            const fileUrl = `${CV_FILE_BASE}/cards/${card.folder}/${card.file}`;
+            return {
+                // CharaVault serves images with "Cross-Origin-Resource-Policy: same-site",
+                // which makes browsers refuse to load them directly from a foreign origin
+                // (SillyTavern) regardless of CORS. Routing through our own proxy strips
+                // that header on the way back, since it isn't forwarded, so the browser
+                // sees a same-origin response and displays it normally.
+                url: `/proxy/${encodeURIComponent(fileUrl)}`,
+                description: card.description_preview || card.first_mes_preview || "No description.",
+                name: card.name || "Unnamed Character",
+                folder: card.folder,
+                file: card.file,
+                tags: Array.isArray(card.tags) ? card.tags : [],
+                author: card.creator || "Unknown Author",
+                avgRating: card.avg_rating,
+                ratingCount: card.rating_count,
+            };
+        });
 
         return cvCharacters;
 
@@ -1038,7 +1046,9 @@ function generateCharacterListItem(character, index, source = 'chub') {
         cv: {
             label: 'CharaVault',
             // No documented human-facing detail page route; link directly to the card file.
-            characterPageUrl: character.url,
+            // Note: this is the real charavault.net URL, not the proxied thumbnail URL in
+            // character.url (see fetchCVCharactersBySearch), since this link opens a new tab.
+            characterPageUrl: `https://charavault.net/cards/${character.folder}/${character.file}`,
             authorPageUrl: null, // Doc has no author profile route either.
             downloadAttrs: `data-source="cv" data-folder="${character.folder}" data-file="${character.file}" data-name="${character.name}"`,
         },
