@@ -1,3 +1,7 @@
+# CHUB-SEARCH becomes MULTI-CHAR-CARD SEARCH
+
+## What does that mean?
+
 # Working, reworked to enable all blacklisted cards.
 ## What new? (old)
 - 30 char cards on one page
