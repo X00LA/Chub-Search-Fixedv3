@@ -41,6 +41,12 @@ const AICC_FILE_BASE = "https://api.aicharactercards.com";
 const CC_SEARCH_PAGE = "https://charactercard.com/download";
 const CC_CHARACTER_RE = /"id":"([a-f0-9-]{36})","name":"((?:[^"\\]|\\.)*)","tagline":"((?:[^"\\]|\\.)*)","greeting":"((?:[^"\\]|\\.)*)","seo_description":"((?:[^"\\]|\\.)*)","avatar_image_url":"((?:[^"\\]|\\.)*)"/g;
 
+// CharaVault endpoints — has an actual documented REST API (https://charavault.net/developers),
+// no login needed for search/download. Still no CORS headers, so this goes through the proxy
+// like the others. Cards are ready-made PNGs with metadata already embedded.
+const CV_API_BASE = "https://charavault.net/api";
+const CV_FILE_BASE = "https://charavault.net";
+
 /**
  * Fetches a URL through SillyTavern's CORS proxy, since character-tavern.com does not
  * allow direct cross-origin requests from the browser.
@@ -82,7 +88,8 @@ let chubCharacters = [];
 let ctCharacters = [];
 let aiccCharacters = [];
 let ccCharacters = [];
-let activeSource = 'chub'; // 'chub', 'ct', 'aicc', or 'cc'
+let cvCharacters = [];
+let activeSource = 'chub'; // 'chub', 'ct', 'aicc', 'cc', or 'cv'
 let characterListContainer = null;  // A global variable to hold the reference
 let popupState = null;
 let savedPopupContent = null;
@@ -405,6 +412,41 @@ async function downloadCCCharacter(coverUrl, fallbackName) {
             toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use CharacterCard.com.', 'CORS proxy disabled', { timeOut: 8000 });
         } else {
             toastr.error(`Could not import "${fallbackName}" from CharacterCard.com.`, 'Import failed');
+        }
+    }
+}
+
+/**
+ * Downloads a character from CharaVault and imports it into SillyTavern.
+ * CharaVault has an actual documented REST API; cards are ready-made PNGs with
+ * metadata already embedded (v1 tavern format, no "spec" field, but SillyTavern's
+ * importer handles that format natively).
+ * @param {string} folder - The card's folder, from the search result ("folder" field).
+ * @param {string} fileName - The card's file name, from the search result ("file" field).
+ * @param {string} [displayName] - The character's display name, for toasts only.
+ * @returns {Promise<void>}
+ */
+async function downloadCVCharacter(folder, fileName, displayName) {
+    console.debug('CharaVault import started', folder, fileName);
+    const label = displayName || fileName;
+    try {
+        const fileUrl = `${CV_FILE_BASE}/cards/${encodeURIComponent(folder)}/${encodeURIComponent(fileName)}`;
+        const fileRes = await ctFetch(fileUrl);
+        if (!fileRes.ok) {
+            throw new Error(`File download failed: ${fileRes.status}`);
+        }
+
+        const blob = await fileRes.blob();
+        const file = new File([blob], fileName, { type: 'image/png' });
+
+        await processDroppedFiles([file]);
+        toastr.success(`Imported "${label}" from CharaVault.`);
+    } catch (error) {
+        console.error('CharaVault import failed', error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use CharaVault.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.error(`Could not import "${label}" from CharaVault.`, 'Import failed');
         }
     }
 }
@@ -827,6 +869,69 @@ async function fetchCCCharactersBySearch(options) {
     }
 }
 
+/**
+ * Fetches characters from CharaVault based on specified search criteria.
+ * Uses CharaVault's documented REST API (https://charavault.net/developers).
+ * @param {Object} options - Search options: searchTerm, includeTags, nsfwFilter, requireLore,
+ *                            sort, page, first.
+ * @returns {Promise<Array>} - Resolves with an array of normalized character objects.
+ */
+async function fetchCVCharactersBySearch(options) {
+    const limit = options.first || extension_settings.chub.findCount || 30;
+    const page = options.page || 1;
+
+    const params = new URLSearchParams();
+    if (options.searchTerm) params.set('q', options.searchTerm);
+    if (Array.isArray(options.includeTags) && options.includeTags.length > 0) {
+        params.set('tags', options.includeTags.join(','));
+    }
+    if (options.nsfwFilter === 'sfw') params.set('nsfw', 'false');
+    if (options.nsfwFilter === 'nsfw') params.set('nsfw', 'true');
+    if (options.requireLore) params.set('has_book', 'true');
+    if (options.sort) params.set('sort', options.sort);
+    params.set('limit', String(limit));
+    params.set('offset', String((page - 1) * limit));
+
+    const url = `${CV_API_BASE}/cards?${params.toString()}`;
+    console.log("Fetching CharaVault:", url);
+
+    try {
+        const searchResponse = await ctFetch(url, { headers: { 'Accept': 'application/json' } });
+
+        if (!searchResponse.ok) {
+            console.error('CharaVault API request failed:', searchResponse.status, searchResponse.statusText);
+            toastr.error(`CharaVault search failed: ${searchResponse.statusText}`, "API Error");
+            return [];
+        }
+
+        const searchData = await searchResponse.json();
+        const cards = searchData.results || [];
+
+        cvCharacters = cards.map(card => ({
+            url: `${CV_FILE_BASE}/cards/${card.folder}/${card.file}`,
+            description: card.description_preview || card.first_mes_preview || "No description.",
+            name: card.name || "Unnamed Character",
+            folder: card.folder,
+            file: card.file,
+            tags: Array.isArray(card.tags) ? card.tags : [],
+            author: card.creator || "Unknown Author",
+            avgRating: card.avg_rating,
+            ratingCount: card.rating_count,
+        }));
+
+        return cvCharacters;
+
+    } catch (error) {
+        console.error("Error during CharaVault search fetch:", error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use CharaVault.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.error("An error occurred while searching CharaVault.", "Fetch Error");
+        }
+        return [];
+    }
+}
+
 
 /**
  * Searches for characters based on the provided options and manages the UI during the search.
@@ -847,6 +952,7 @@ async function searchCharacters(options, source) {
         ct: fetchCTCharactersBySearch,
         aicc: fetchAICCCharactersBySearch,
         cc: fetchCCCharactersBySearch,
+        cv: fetchCVCharactersBySearch,
     };
     const characters = await (fetchers[source] || fetchCharactersBySearch)(options);
     if (characterListContainer) {
@@ -928,6 +1034,13 @@ function generateCharacterListItem(character, index, source = 'chub') {
             characterPageUrl: `https://charactercard.com/character/${character.id}/profile`,
             authorPageUrl: null, // Not present in the search result payload.
             downloadAttrs: `data-source="cc" data-cover-url="${character.url}" data-name="${character.name}"`,
+        },
+        cv: {
+            label: 'CharaVault',
+            // No documented human-facing detail page route; link directly to the card file.
+            characterPageUrl: character.url,
+            authorPageUrl: null, // Doc has no author profile route either.
+            downloadAttrs: `data-source="cv" data-folder="${character.folder}" data-file="${character.file}" data-name="${character.name}"`,
         },
     };
     const { label: siteLabel, characterPageUrl, authorPageUrl, downloadAttrs } = sourceMeta[source] || sourceMeta.chub;
@@ -1016,11 +1129,24 @@ function createPopupLayout() {
         "trending": "Trending",
     };
 
+    const cvReadableSortOptions = {
+        "newest": "Newest",
+        "oldest": "Oldest",
+        "name_asc": "Name (A-Z)",
+        "name_desc": "Name (Z-A)",
+        "most_downloaded": "Most Downloaded",
+        "top_rated": "Top Rated",
+        "token_count_asc": "Tokens (Low-High)",
+        "token_count_desc": "Tokens (High-Low)",
+        "most_commented": "Most Commented",
+    };
+
     const chubTab = activeSource === 'chub';
     const ctTab = activeSource === 'ct';
     const aiccTab = activeSource === 'aicc';
     const ccTab = activeSource === 'cc';
-    const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters, cc: ccCharacters };
+    const cvTab = activeSource === 'cv';
+    const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters, cc: ccCharacters, cv: cvCharacters };
     const activeCharacters = charactersBySource[activeSource] || [];
 
     return `
@@ -1030,6 +1156,7 @@ function createPopupLayout() {
         <div class="chub-source-tab${ctTab ? ' active' : ''}" data-source-tab="ct">Character Tavern</div>
         <div class="chub-source-tab${aiccTab ? ' active' : ''}" data-source-tab="aicc">AICharacterCards</div>
         <div class="chub-source-tab${ccTab ? ' active' : ''}" data-source-tab="cc">CharacterCard.com</div>
+        <div class="chub-source-tab${cvTab ? ' active' : ''}" data-source-tab="cv">CharaVault</div>
     </div>
     <div class="chub-list-popup">
         ${activeCharacters.map((character, index) => generateCharacterListItem(character, index, activeSource)).join('')}
@@ -1195,6 +1322,50 @@ function createPopupLayout() {
         </div>
     </div>
     </div>
+
+    <div class="chub-source-panel" data-source-panel="cv"${cvTab ? '' : ' hidden'}>
+    <div class="search-container chub-search-container">
+        <div class="chub-search-grid">
+            ${createTextInput('cvSearchInput', '<i class="fas fa-search"></i> Search', 'Search name, description...', '', 'Full-text search')}
+            ${createTextInput('cvIncludeTags', '<i class="fas fa-plus-square"></i> Include tags', 'comma separated', '', 'Tags the character MUST have')}
+        </div>
+
+        <details class="chub-details">
+            <summary class="chub-summary">Filters</summary>
+            <div class="chub-filter-grid">
+                <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+                    <label for="cvNsfwFilter">NSFW:</label>
+                    <select class="margin0" id="cvNsfwFilter">
+                        <option value="">Show All</option>
+                        <option value="sfw">SFW Only</option>
+                        <option value="nsfw">NSFW Only</option>
+                    </select>
+                </div>
+                ${createCheckbox('cvRequireLoreCheckbox', 'Need Lorebook', false, 'Require characters to have a linked lorebook')}
+            </div>
+        </details>
+
+        <div class="chub-toolbar">
+            <div class="chub-toolbar-section chub-sort-controls">
+                <label for="cvSortOrder">Sort:</label>
+                <select class="margin0" id="cvSortOrder">
+                    ${Object.entries(cvReadableSortOptions).map(([key, value]) => `<option value="${key}">${value}</option>`).join('')}
+                </select>
+                <label for="cvResultsPerPage">Per Page:</label>
+                <input type="number" id="cvResultsPerPage" class="text_pole textarea_compact" min="1" max="200" value="${currentSettings.findCount || 30}">
+            </div>
+            <div class="chub-toolbar-section page-buttons">
+                <button class="menu_button" id="cvPageDownButton" title="Previous Page"><i class="fas fa-chevron-left"></i></button>
+                <label for="cvPageNumber">Page:</label>
+                <input type="number" id="cvPageNumber" class="text_pole textarea_compact" min="1" value="1">
+                <button class="menu_button" id="cvPageUpButton" title="Next Page"><i class="fas fa-chevron-right"></i></button>
+            </div>
+            <div class="chub-toolbar-section chub-toolbar-search">
+                <div class="menu_button chub-search-button" id="cvSearchButton"><i class="fas fa-search"></i> Search</div>
+            </div>
+        </div>
+    </div>
+    </div>
 </div>
 `;
 }
@@ -1315,6 +1486,19 @@ async function displayCharactersInListViewPopup() {
                 return;
             }
 
+            if (source === 'cv') {
+                const folder = event.target.getAttribute('data-folder');
+                const file = event.target.getAttribute('data-file');
+                const name = event.target.getAttribute('data-name');
+                if (!folder || !file) {
+                    console.error("Download button missing data-folder/data-file attribute");
+                    toastr.warning("Could not initiate download: card file location missing.");
+                    return;
+                }
+                downloadCVCharacter(folder, file, name);
+                return;
+            }
+
             const fullPath = event.target.getAttribute('data-path');
             if (!fullPath) {
                 console.error("Download button missing data-path attribute");
@@ -1362,7 +1546,7 @@ async function displayCharactersInListViewPopup() {
                 panel.hidden = panel.getAttribute('data-source-panel') !== newSource;
             });
 
-            const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters, cc: ccCharacters };
+            const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters, cc: ccCharacters, cv: cvCharacters };
             const currentCharacters = charactersBySource[newSource] || [];
             updateCharacterListInView(currentCharacters, newSource);
             if (currentCharacters.length === 0 && characterListContainer) {
@@ -1764,6 +1948,99 @@ async function displayCharactersInListViewPopup() {
     });
 
     if (ccSearchButton) ccSearchButton.addEventListener('click', handleCCSearch);
+
+    // --- CharaVault search inputs ---
+    const cvSearchInputs = [
+        'cvSearchInput', 'cvIncludeTags', 'cvNsfwFilter', 'cvRequireLoreCheckbox',
+        'cvSortOrder', 'cvResultsPerPage', 'cvPageNumber',
+    ];
+
+    const cvSearchButton = document.getElementById('cvSearchButton');
+    const cvPageUpButton = document.getElementById('cvPageUpButton');
+    const cvPageDownButton = document.getElementById('cvPageDownButton');
+
+    const handleCVSearch = async function (e) {
+        console.debug('handleCVSearch triggered by:', e.target.id || e.type);
+
+        if (e.type === 'keyup' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+        if (e.type === 'keydown' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+
+        const getVal = (id) => document.getElementById(id)?.value;
+        const getChecked = (id) => document.getElementById(id)?.checked;
+        const getInt = (id) => {
+            const val = getVal(id);
+            return val ? parseInt(val, 10) : null;
+        };
+        const splitAndTrim = (id) => {
+            const str = getVal(id);
+            if (!str) return [];
+            return str.split(',').map(tag => tag.trim()).filter(tag => tag);
+        };
+
+        let currentPage = getInt('cvPageNumber') || 1;
+
+        if (e.target.id === 'cvPageUpButton' || e.target.closest('#cvPageUpButton')) {
+            currentPage++;
+        } else if (e.target.id === 'cvPageDownButton' || e.target.closest('#cvPageDownButton')) {
+            currentPage--;
+        }
+
+        currentPage = clamp(currentPage, 1, Number.MAX_SAFE_INTEGER);
+        if (document.getElementById('cvPageNumber')) {
+            document.getElementById('cvPageNumber').value = currentPage;
+        }
+
+        const options = {
+            searchTerm: getVal('cvSearchInput'),
+            includeTags: splitAndTrim('cvIncludeTags'),
+            nsfwFilter: getVal('cvNsfwFilter'),
+            requireLore: getChecked('cvRequireLoreCheckbox'),
+            sort: getVal('cvSortOrder'),
+            first: getInt('cvResultsPerPage'),
+            page: currentPage,
+        };
+
+        if (e.target.id !== 'cvPageNumber' && e.target.id !== 'cvPageUpButton' && e.target.id !== 'cvPageDownButton' && !e.target.closest('#cvPageUpButton') && !e.target.closest('#cvPageDownButton')) {
+            options.page = 1;
+            if (document.getElementById('cvPageNumber')) {
+                document.getElementById('cvPageNumber').value = 1;
+            }
+        }
+
+        executeCharacterSearchDebounced(options, 'cv');
+
+        if (document.getElementById('cvResultsPerPage') && options.first) {
+            extension_settings.chub.findCount = options.first;
+        }
+    };
+
+    cvSearchInputs.forEach(inputId => {
+        const element = document.getElementById(inputId);
+        if (element) {
+            const eventType = (element.type === 'checkbox' || element.tagName === 'SELECT') ? 'change' : 'keyup';
+            element.addEventListener(eventType, handleCVSearch);
+            if (element.type === 'number') {
+                element.addEventListener('change', handleCVSearch);
+            }
+            if (element.type === 'text') {
+                element.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        handleCVSearch(e);
+                    }
+                });
+            }
+        } else {
+            console.warn(`Element with ID ${inputId} not found for event listener.`);
+        }
+    });
+
+    if (cvSearchButton) cvSearchButton.addEventListener('click', handleCVSearch);
+    if (cvPageUpButton) cvPageUpButton.addEventListener('click', handleCVSearch);
+    if (cvPageDownButton) cvPageDownButton.addEventListener('click', handleCVSearch);
 
     // Trigger initial search if desired (optional)
     // handleSearch({ target: { id: 'initial-load' } }); // Uncomment to search on open
