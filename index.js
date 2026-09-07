@@ -31,6 +31,16 @@ const CT_IMAGE_BASE = "https://ct-cards.storage.character-tavern.com";
 const AICC_API_BASE = "https://api.aicharactercards.com/api";
 const AICC_FILE_BASE = "https://api.aicharactercards.com";
 
+// CharacterCard.com endpoints (undocumented; the site has no classic REST search API, it's a
+// Next.js app that renders search results server-side as React Server Component payloads).
+// Requesting the page with an "RSC: 1" header returns that payload as text instead of full
+// HTML, and character objects can be pulled out of it with a regex since it's not valid JSON
+// on its own. No CORS headers either, so this also goes through the proxy. Cards are hosted
+// as ready-made PNGs with metadata already embedded (same as AICharacterCards/Chub); the file
+// URL is derived from the cover image URL embedded in the search results.
+const CC_SEARCH_PAGE = "https://charactercard.com/download";
+const CC_CHARACTER_RE = /"id":"([a-f0-9-]{36})","name":"((?:[^"\\]|\\.)*)","tagline":"((?:[^"\\]|\\.)*)","greeting":"((?:[^"\\]|\\.)*)","seo_description":"((?:[^"\\]|\\.)*)","avatar_image_url":"((?:[^"\\]|\\.)*)"/g;
+
 /**
  * Fetches a URL through SillyTavern's CORS proxy, since character-tavern.com does not
  * allow direct cross-origin requests from the browser.
@@ -71,7 +81,8 @@ const defaultSettings = {
 let chubCharacters = [];
 let ctCharacters = [];
 let aiccCharacters = [];
-let activeSource = 'chub'; // 'chub', 'ct', or 'aicc'
+let ccCharacters = [];
+let activeSource = 'chub'; // 'chub', 'ct', 'aicc', or 'cc'
 let characterListContainer = null;  // A global variable to hold the reference
 let popupState = null;
 let savedPopupContent = null;
@@ -356,6 +367,44 @@ async function downloadAICCCharacter(id, fallbackName) {
             toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use AICharacterCards.', 'CORS proxy disabled', { timeOut: 8000 });
         } else {
             toastr.error(`Could not import "${fallbackName}" from AICharacterCards.`, 'Import failed');
+        }
+    }
+}
+
+/**
+ * Downloads a character from CharacterCard.com and imports it into SillyTavern.
+ * Like AICharacterCards, cards are ready-made PNGs with metadata already embedded.
+ * The download file lives at the same path as the cover image, just under "/card/"
+ * instead of "/cover/" and with a ".png" extension instead of ".webp".
+ * @param {string} coverUrl - The character's cover image URL from the search results.
+ * @param {string} fallbackName - Card title, used for the toast/filename if anything is missing.
+ * @returns {Promise<void>}
+ */
+async function downloadCCCharacter(coverUrl, fallbackName) {
+    console.debug('CharacterCard.com import started', coverUrl);
+    try {
+        const fileUrl = coverUrl.replace('/cover/', '/card/').replace(/\.webp$/i, '.png');
+        if (fileUrl === coverUrl) {
+            throw new Error('Could not derive card file URL from cover image URL');
+        }
+
+        const fileRes = await ctFetch(fileUrl);
+        if (!fileRes.ok) {
+            throw new Error(`File download failed: ${fileRes.status}`);
+        }
+
+        const blob = await fileRes.blob();
+        const fileName = `${fallbackName || 'character'}.png`;
+        const file = new File([blob], fileName, { type: 'image/png' });
+
+        await processDroppedFiles([file]);
+        toastr.success(`Imported "${fallbackName}" from CharacterCard.com.`);
+    } catch (error) {
+        console.error('CharacterCard.com import failed', error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use CharacterCard.com.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.error(`Could not import "${fallbackName}" from CharacterCard.com.`, 'Import failed');
         }
     }
 }
@@ -707,6 +756,77 @@ async function fetchAICCCharactersBySearch(options) {
     }
 }
 
+/**
+ * Fetches characters from CharacterCard.com based on specified search criteria.
+ * There's no classic REST search API here; the site's Next.js app renders results
+ * server-side. Requesting the page with the "RSC: 1" header returns the React Server
+ * Component payload as text instead of full HTML, and character objects are pulled out
+ * of it with a regex (see CC_CHARACTER_RE) since the payload isn't valid JSON on its own.
+ * No working pagination parameter was found, so this always returns the first result set.
+ * @param {Object} options - Search options: searchTerm, includeTags.
+ * @returns {Promise<Array>} - Resolves with an array of normalized character objects.
+ */
+async function fetchCCCharactersBySearch(options) {
+    const params = new URLSearchParams();
+    if (options.searchTerm) params.set('search', options.searchTerm);
+    if (Array.isArray(options.includeTags) && options.includeTags.length > 0) {
+        params.set('tags', options.includeTags.join(','));
+    }
+
+    const url = `${CC_SEARCH_PAGE}?${params.toString()}`;
+    console.log("Fetching CharacterCard.com:", url);
+
+    try {
+        const searchResponse = await ctFetch(url, { headers: { 'RSC': '1' } });
+
+        if (!searchResponse.ok) {
+            console.error('CharacterCard.com request failed:', searchResponse.status, searchResponse.statusText);
+            toastr.error(`CharacterCard.com search failed: ${searchResponse.statusText}`, "API Error");
+            return [];
+        }
+
+        const payload = await searchResponse.text();
+        const results = [];
+        let match;
+        CC_CHARACTER_RE.lastIndex = 0;
+        while ((match = CC_CHARACTER_RE.exec(payload)) !== null) {
+            const [, id, name, tagline, , , avatarUrl] = match;
+            const unescapeJsonString = (s) => s.replace(/\\(.)/g, '$1');
+
+            // Tags aren't part of the fixed field order matched above, so grab the next
+            // "tags":[...] array that appears before the following character object starts.
+            const afterMatch = match.index + match[0].length;
+            const nextCharIndex = payload.indexOf('"id":"', afterMatch);
+            const window = payload.slice(afterMatch, nextCharIndex === -1 ? afterMatch + 1000 : nextCharIndex);
+            const tagsMatch = window.match(/"tags":\[(.*?)\]/);
+            const tags = tagsMatch
+                ? tagsMatch[1].split(',').map(t => unescapeJsonString(t.trim().replace(/^"|"$/g, ''))).filter(Boolean)
+                : [];
+
+            results.push({
+                url: unescapeJsonString(avatarUrl),
+                description: unescapeJsonString(tagline) || "No description.",
+                name: unescapeJsonString(name) || "Unnamed Character",
+                id,
+                tags,
+                author: "Unknown Author", // Not present in the search result payload.
+            });
+        }
+
+        ccCharacters = results;
+        return ccCharacters;
+
+    } catch (error) {
+        console.error("Error during CharacterCard.com search fetch:", error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use CharacterCard.com.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.error("An error occurred while searching CharacterCard.com.", "Fetch Error");
+        }
+        return [];
+    }
+}
+
 
 /**
  * Searches for characters based on the provided options and manages the UI during the search.
@@ -726,6 +846,7 @@ async function searchCharacters(options, source) {
     const fetchers = {
         ct: fetchCTCharactersBySearch,
         aicc: fetchAICCCharactersBySearch,
+        cc: fetchCCCharactersBySearch,
     };
     const characters = await (fetchers[source] || fetchCharactersBySearch)(options);
     if (characterListContainer) {
@@ -802,12 +923,20 @@ function generateCharacterListItem(character, index, source = 'chub') {
             authorPageUrl: null, // No known author profile URL scheme; shown as plain text instead.
             downloadAttrs: `data-source="aicc" data-id="${character.id}" data-name="${character.name}"`,
         },
+        cc: {
+            label: 'CharacterCard.com',
+            characterPageUrl: `https://charactercard.com/character/${character.id}/profile`,
+            authorPageUrl: null, // Not present in the search result payload.
+            downloadAttrs: `data-source="cc" data-cover-url="${character.url}" data-name="${character.name}"`,
+        },
     };
     const { label: siteLabel, characterPageUrl, authorPageUrl, downloadAttrs } = sourceMeta[source] || sourceMeta.chub;
 
-    const authorHtml = authorPageUrl
-        ? `<a href="${authorPageUrl}" target="_blank" title="View author on ${siteLabel}: ${character.author}"><span class="chub-author">by ${character.author}</span></a>`
-        : `<span class="chub-author">by ${character.author}</span>`;
+    const authorHtml = character.author === "Unknown Author"
+        ? ''
+        : authorPageUrl
+            ? `<a href="${authorPageUrl}" target="_blank" title="View author on ${siteLabel}: ${character.author}"><span class="chub-author">by ${character.author}</span></a>`
+            : `<span class="chub-author">by ${character.author}</span>`;
 
     return `
         <div class="chub-character-item" data-index="${index}">
@@ -890,7 +1019,8 @@ function createPopupLayout() {
     const chubTab = activeSource === 'chub';
     const ctTab = activeSource === 'ct';
     const aiccTab = activeSource === 'aicc';
-    const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters };
+    const ccTab = activeSource === 'cc';
+    const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters, cc: ccCharacters };
     const activeCharacters = charactersBySource[activeSource] || [];
 
     return `
@@ -899,6 +1029,7 @@ function createPopupLayout() {
         <div class="chub-source-tab${chubTab ? ' active' : ''}" data-source-tab="chub">Chub</div>
         <div class="chub-source-tab${ctTab ? ' active' : ''}" data-source-tab="ct">Character Tavern</div>
         <div class="chub-source-tab${aiccTab ? ' active' : ''}" data-source-tab="aicc">AICharacterCards</div>
+        <div class="chub-source-tab${ccTab ? ' active' : ''}" data-source-tab="cc">CharacterCard.com</div>
     </div>
     <div class="chub-list-popup">
         ${activeCharacters.map((character, index) => generateCharacterListItem(character, index, activeSource)).join('')}
@@ -1049,6 +1180,21 @@ function createPopupLayout() {
         </div>
     </div>
     </div>
+
+    <div class="chub-source-panel" data-source-panel="cc"${ccTab ? '' : ' hidden'}>
+    <div class="search-container chub-search-container">
+        <div class="chub-search-grid">
+            ${createTextInput('ccSearchInput', '<i class="fas fa-search"></i> Search', 'Search name, tagline...', '', 'Full-text search across name and tagline')}
+            ${createTextInput('ccIncludeTags', '<i class="fas fa-plus-square"></i> Include tags', 'comma separated', '', 'Tags the character MUST have')}
+        </div>
+
+        <div class="chub-toolbar">
+            <div class="chub-toolbar-section chub-toolbar-search" style="flex: 1 1 auto; justify-content: flex-end;">
+                <div class="menu_button chub-search-button" id="ccSearchButton"><i class="fas fa-search"></i> Search</div>
+            </div>
+        </div>
+    </div>
+    </div>
 </div>
 `;
 }
@@ -1157,6 +1303,18 @@ async function displayCharactersInListViewPopup() {
                 return;
             }
 
+            if (source === 'cc') {
+                const coverUrl = event.target.getAttribute('data-cover-url');
+                const name = event.target.getAttribute('data-name');
+                if (!coverUrl) {
+                    console.error("Download button missing data-cover-url attribute");
+                    toastr.warning("Could not initiate download: cover image URL missing.");
+                    return;
+                }
+                downloadCCCharacter(coverUrl, name);
+                return;
+            }
+
             const fullPath = event.target.getAttribute('data-path');
             if (!fullPath) {
                 console.error("Download button missing data-path attribute");
@@ -1204,7 +1362,7 @@ async function displayCharactersInListViewPopup() {
                 panel.hidden = panel.getAttribute('data-source-panel') !== newSource;
             });
 
-            const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters };
+            const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters, cc: ccCharacters };
             const currentCharacters = charactersBySource[newSource] || [];
             updateCharacterListInView(currentCharacters, newSource);
             if (currentCharacters.length === 0 && characterListContainer) {
@@ -1561,6 +1719,51 @@ async function displayCharactersInListViewPopup() {
     if (aiccSearchButton) aiccSearchButton.addEventListener('click', handleAICCSearch);
     if (aiccPageUpButton) aiccPageUpButton.addEventListener('click', handleAICCSearch);
     if (aiccPageDownButton) aiccPageDownButton.addEventListener('click', handleAICCSearch);
+
+    // --- CharacterCard.com search inputs ---
+    const ccSearchInputs = ['ccSearchInput', 'ccIncludeTags'];
+    const ccSearchButton = document.getElementById('ccSearchButton');
+
+    const handleCCSearch = async function (e) {
+        console.debug('handleCCSearch triggered by:', e.target.id || e.type);
+
+        if (e.type === 'keyup' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+        if (e.type === 'keydown' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+
+        const getVal = (id) => document.getElementById(id)?.value;
+        const splitAndTrim = (id) => {
+            const str = getVal(id);
+            if (!str) return [];
+            return str.split(',').map(tag => tag.trim()).filter(tag => tag);
+        };
+
+        const options = {
+            searchTerm: getVal('ccSearchInput'),
+            includeTags: splitAndTrim('ccIncludeTags'),
+        };
+
+        executeCharacterSearchDebounced(options, 'cc');
+    };
+
+    ccSearchInputs.forEach(inputId => {
+        const element = document.getElementById(inputId);
+        if (element) {
+            element.addEventListener('keyup', handleCCSearch);
+            element.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    handleCCSearch(e);
+                }
+            });
+        } else {
+            console.warn(`Element with ID ${inputId} not found for event listener.`);
+        }
+    });
+
+    if (ccSearchButton) ccSearchButton.addEventListener('click', handleCCSearch);
 
     // Trigger initial search if desired (optional)
     // handleSearch({ target: { id: 'initial-load' } }); // Uncomment to search on open
