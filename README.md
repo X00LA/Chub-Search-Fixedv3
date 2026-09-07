@@ -5,8 +5,10 @@
 - fix cards download (thanks for this, fork "Fixed-SillyTavern-Chub-Search")
 - limit of 8 tags
 - full card description
+- overhauled search popup UI (combined search fields, single sort/pagination/search toolbar row)
+- added [Character Tavern](https://character-tavern.com/) and [AICharacterCards](https://aicharactercards.com/) as additional search sources, each in their own tab
 ## What it is?
-SillyTavern Chub Search is an which provides a quick and easy way to search for new cards from [CHUB](https://www.chub.ai/about) from the comfort of your tavern. 
+SillyTavern Chub Search provides a quick and easy way to search for new cards from [CHUB](https://www.chub.ai/about), [Character Tavern](https://character-tavern.com/), and [AICharacterCards](https://aicharactercards.com/) from the comfort of your tavern.
 
 ![image](https://github.com/city-unit/SillyTavern-Chub-Search/assets/140349364/648e43ae-3ed0-4673-b024-f4ba7846998c)
 
@@ -17,11 +19,11 @@ Utilize SillyTavern's third party extension importer to install.
 
 ![image](https://github.com/city-unit/st-auto-tagger/assets/1860540/188b8ba5-c121-4357-96f8-a45bd60cf8a5)
 
-To use the search, click the thunderbolt icon.
+To use the search, click the thunderbolt icon. The popup opens with a tab for each source — **Chub**, **Character Tavern**, and **AICharacterCards** — each with its own search fields, tag/NSFW filters, and sorting options suited to that site's API.
 
 ![image](https://github.com/city-unit/st-chub-search/assets/140349364/a8857619-54df-43f8-b42d-2635d4c5a412)
 
-To update the search results, click "Search"
+Enter your search criteria and click "Search" (or press Enter in a text field) to fetch results for the active tab. Click the download icon on a result to import it directly into SillyTavern.
 
 ## Prerequisites
 
