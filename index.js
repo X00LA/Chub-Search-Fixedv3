@@ -140,9 +140,106 @@ async function downloadCharacter(input) {
 }
 
 /**
+ * Computes the CRC32 checksum used by PNG chunks (over the chunk type + data bytes).
+ * @param {Uint8Array} bytes - Bytes to checksum.
+ * @returns {number} - Unsigned 32-bit CRC.
+ */
+function crc32(bytes) {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) {
+        crc ^= bytes[i];
+        for (let j = 0; j < 8; j++) {
+            crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+        }
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+/**
+ * Builds a raw PNG chunk (length + type + data + CRC) as per the PNG spec.
+ * @param {string} type - 4-character chunk type (e.g. "tEXt").
+ * @param {Uint8Array} data - Chunk payload.
+ * @returns {Uint8Array} - The fully encoded chunk, ready to be spliced into a PNG buffer.
+ */
+function buildPngChunk(type, data) {
+    const typeBytes = new Uint8Array([type.charCodeAt(0), type.charCodeAt(1), type.charCodeAt(2), type.charCodeAt(3)]);
+    const chunk = new Uint8Array(4 + 4 + data.length + 4);
+    const view = new DataView(chunk.buffer);
+    view.setUint32(0, data.length, false);
+    chunk.set(typeBytes, 4);
+    chunk.set(data, 8);
+    const crcInput = new Uint8Array(4 + data.length);
+    crcInput.set(typeBytes, 0);
+    crcInput.set(data, 4);
+    view.setUint32(8 + data.length, crc32(crcInput), false);
+    return chunk;
+}
+
+/**
+ * Embeds a Character Card V2 JSON payload into a PNG image as a "chara" tEXt chunk,
+ * the same format SillyTavern itself writes and reads for character card avatars.
+ * @param {ArrayBuffer} imageBuffer - Raw PNG file bytes.
+ * @param {object} cardV2 - The Character Card V2 object to embed.
+ * @returns {Uint8Array} - A new PNG buffer with the metadata chunk inserted before IEND.
+ */
+function embedCharaIntoPng(imageBuffer, cardV2) {
+    const bytes = new Uint8Array(imageBuffer);
+    const pngSignature = bytes.slice(0, 8);
+
+    // Walk the chunk list, dropping any pre-existing "chara"/"ccv3" tEXt chunks.
+    const chunks = [];
+    let offset = 8;
+    while (offset < bytes.length) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset + offset);
+        const length = view.getUint32(0, false);
+        const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+        const chunkEnd = offset + 12 + length;
+        const chunkBytes = bytes.slice(offset, chunkEnd);
+
+        if (type === 'tEXt') {
+            const data = chunkBytes.slice(8, 8 + length);
+            const nullIndex = data.indexOf(0);
+            const keyword = nullIndex >= 0 ? String.fromCharCode(...data.slice(0, nullIndex)) : '';
+            if (keyword.toLowerCase() === 'chara' || keyword.toLowerCase() === 'ccv3') {
+                offset = chunkEnd;
+                continue;
+            }
+        }
+
+        chunks.push(chunkBytes);
+        offset = chunkEnd;
+    }
+
+    // Build the "chara" tEXt chunk: keyword + \x00 + base64(JSON), as SillyTavern expects.
+    const base64Data = btoa(unescape(encodeURIComponent(JSON.stringify(cardV2))));
+    const keyword = 'chara';
+    const textPayload = new Uint8Array(keyword.length + 1 + base64Data.length);
+    for (let i = 0; i < keyword.length; i++) textPayload[i] = keyword.charCodeAt(i);
+    textPayload[keyword.length] = 0;
+    for (let i = 0; i < base64Data.length; i++) textPayload[keyword.length + 1 + i] = base64Data.charCodeAt(i);
+    const charaChunk = buildPngChunk('tEXt', textPayload);
+
+    // Insert the new chunk right before IEND (always the last chunk in a valid PNG).
+    const iendIndex = chunks.length - 1;
+    chunks.splice(iendIndex, 0, charaChunk);
+
+    const totalLength = pngSignature.length + chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const output = new Uint8Array(totalLength);
+    output.set(pngSignature, 0);
+    let writeOffset = pngSignature.length;
+    for (const chunk of chunks) {
+        output.set(chunk, writeOffset);
+        writeOffset += chunk.length;
+    }
+    return output;
+}
+
+/**
  * Downloads a character from Character Tavern and imports it into SillyTavern.
  * Character Tavern has no ready-made PNG/download endpoint like Chub, so we fetch
- * the raw card fields via its API and assemble a Character Card V2 JSON file ourselves.
+ * the raw card fields via its API, assemble a Character Card V2 JSON payload, and
+ * embed it into the card's own preview image so the avatar comes through on import
+ * (a plain JSON import would leave SillyTavern's default placeholder avatar instead).
  * @param {string} id - The Character Tavern card id (e.g. "CT_xxxx...").
  * @param {string} path - The "author/char_name" path, used for the API and image lookup.
  * @returns {Promise<void>}
@@ -151,10 +248,12 @@ async function downloadCTCharacter(id, path) {
     console.debug('Character Tavern import started', id, path);
     try {
         const [author, charName] = path.split('/');
-        const [detailRes, tagsRes, greetingsRes] = await Promise.all([
+        const imageUrl = `${CT_IMAGE_BASE}/${path}.png?format=png`;
+        const [detailRes, tagsRes, greetingsRes, imageRes] = await Promise.all([
             ctFetch(`${CT_API_CHARACTER}/${encodeURIComponent(author)}/${encodeURIComponent(charName)}`),
             ctFetch(`${CT_API_CHARACTER}/${encodeURIComponent(id)}/tags`),
             ctFetch(`${CT_API_CHARACTER}/${encodeURIComponent(id)}/alternative-greetings`),
+            ctFetch(imageUrl),
         ]);
 
         if (!detailRes.ok) {
@@ -186,10 +285,19 @@ async function downloadCTCharacter(id, path) {
             },
         };
 
-        const jsonBlob = new Blob([JSON.stringify(cardV2)], { type: 'application/json' });
-        const jsonFile = new File([jsonBlob], `${cardV2.data.name}.json`, { type: 'application/json' });
+        let file;
+        if (imageRes.ok) {
+            const imageBuffer = await imageRes.arrayBuffer();
+            const pngWithMetadata = embedCharaIntoPng(imageBuffer, cardV2);
+            const pngBlob = new Blob([pngWithMetadata], { type: 'image/png' });
+            file = new File([pngBlob], `${cardV2.data.name}.png`, { type: 'image/png' });
+        } else {
+            console.warn(`Could not fetch avatar image for ${path} (${imageRes.status}), importing without one.`);
+            const jsonBlob = new Blob([JSON.stringify(cardV2)], { type: 'application/json' });
+            file = new File([jsonBlob], `${cardV2.data.name}.json`, { type: 'application/json' });
+        }
 
-        await processDroppedFiles([jsonFile]);
+        await processDroppedFiles([file]);
         toastr.success(`Imported "${cardV2.data.name}" from Character Tavern.`);
     } catch (error) {
         console.error('Character Tavern import failed', error);
