@@ -27,11 +27,11 @@ To update the search results, click "Search"
 
 This extension requires >= SillyTavern commit [01e38be](https://github.com/SillyTavern/SillyTavern/commit/01e38be408b4bd40792c3cf86d353ecad60f7ea2) to function.
 
-## Character Tavern support
+## Character Tavern & AICharacterCards support
 
-Besides Chub, this extension can also search and import characters from [Character Tavern](https://character-tavern.com/) via a second tab in the search popup.
+Besides Chub, this extension can also search and import characters from [Character Tavern](https://character-tavern.com/) and [AICharacterCards](https://aicharactercards.com/) via extra tabs in the search popup.
 
-Character Tavern's API does not send CORS headers, so the browser blocks direct requests to it. To work around this, Character Tavern searches and imports are routed through SillyTavern's built-in CORS proxy. This proxy is **disabled by default**, so it needs to be enabled once:
+Neither site sends CORS headers, so the browser blocks direct requests to them. To work around this, searches and imports for both are routed through SillyTavern's built-in CORS proxy. This proxy is **disabled by default**, so it needs to be enabled once:
 
 - In `config.yaml`, set:
   ```yaml
@@ -40,9 +40,9 @@ Character Tavern's API does not send CORS headers, so the browser blocks direct 
   or start SillyTavern with the `--corsProxy` command line flag.
 - Restart the SillyTavern server after changing this setting.
 
-If the proxy is not enabled, searching or importing from Character Tavern will show a toast error explaining that `enableCorsProxy` needs to be turned on. The Chub tab is unaffected and works without this setting.
+If the proxy is not enabled, searching or importing from either site will show a toast error explaining that `enableCorsProxy` needs to be turned on. The Chub tab is unaffected and works without this setting.
 
-Note: Character Tavern's API is undocumented and was reverse-engineered from the site's own JavaScript bundles. It may break if Character Tavern changes their API.
+Note: both APIs are undocumented and were reverse-engineered from each site's own JavaScript bundles. They may break if either site changes their API.
 
 ## Support and Contributions
 

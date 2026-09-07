@@ -24,6 +24,13 @@ const CT_API_SEARCH = "https://character-tavern.com/api/search/cards";
 const CT_API_CHARACTER = "https://character-tavern.com/api/character";
 const CT_IMAGE_BASE = "https://ct-cards.storage.character-tavern.com";
 
+// AICharacterCards endpoints (undocumented, reverse-engineered from the site's JS bundles).
+// api.aicharactercards.com also sends no CORS headers, so this goes through the same proxy.
+// Cards are hosted as ready-made PNGs with metadata already embedded, so importing them
+// works exactly like Chub: fetch the file and hand it straight to processDroppedFiles.
+const AICC_API_BASE = "https://api.aicharactercards.com/api";
+const AICC_FILE_BASE = "https://api.aicharactercards.com";
+
 /**
  * Fetches a URL through SillyTavern's CORS proxy, since character-tavern.com does not
  * allow direct cross-origin requests from the browser.
@@ -63,7 +70,8 @@ const defaultSettings = {
 
 let chubCharacters = [];
 let ctCharacters = [];
-let activeSource = 'chub'; // 'chub' or 'ct'
+let aiccCharacters = [];
+let activeSource = 'chub'; // 'chub', 'ct', or 'aicc'
 let characterListContainer = null;  // A global variable to hold the reference
 let popupState = null;
 let savedPopupContent = null;
@@ -305,6 +313,49 @@ async function downloadCTCharacter(id, path) {
             toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use Character Tavern.', 'CORS proxy disabled', { timeOut: 8000 });
         } else {
             toastr.info("Click to go to the character page", 'Character Tavern import failed', { onclick: () => window.open(`https://character-tavern.com/character/${path}`, '_blank') });
+        }
+    }
+}
+
+/**
+ * Downloads a character from AICharacterCards and imports it into SillyTavern.
+ * Unlike Character Tavern, AICharacterCards hosts ready-made PNG files with the character
+ * card metadata already embedded (like Chub), so we just fetch the file and hand it off.
+ * @param {number|string} id - The AICharacterCards card id.
+ * @param {string} fallbackName - Card title, used for the toast/filename if the fetch fails oddly.
+ * @returns {Promise<void>}
+ */
+async function downloadAICCCharacter(id, fallbackName) {
+    console.debug('AICharacterCards import started', id);
+    try {
+        const detailRes = await ctFetch(`${AICC_API_BASE}/cards/${encodeURIComponent(id)}`);
+        if (!detailRes.ok) {
+            throw new Error(`Card detail request failed: ${detailRes.status}`);
+        }
+        const card = await detailRes.json();
+        const currentVersion = Array.isArray(card.versions) ? card.versions.find(v => v.isCurrent) || card.versions[0] : null;
+        if (!currentVersion?.fileUrl) {
+            throw new Error('Card has no downloadable file');
+        }
+
+        const fileUrl = `${AICC_FILE_BASE}${currentVersion.fileUrl}`;
+        const fileRes = await ctFetch(fileUrl);
+        if (!fileRes.ok) {
+            throw new Error(`File download failed: ${fileRes.status}`);
+        }
+
+        const blob = await fileRes.blob();
+        const fileName = currentVersion.fileName || `${card.title || fallbackName || 'character'}.png`;
+        const file = new File([blob], fileName, { type: 'image/png' });
+
+        await processDroppedFiles([file]);
+        toastr.success(`Imported "${card.title || fallbackName}" from AICharacterCards.`);
+    } catch (error) {
+        console.error('AICharacterCards import failed', error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use AICharacterCards.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.error(`Could not import "${fallbackName}" from AICharacterCards.`, 'Import failed');
         }
     }
 }
@@ -575,6 +626,87 @@ async function fetchCTCharactersBySearch(options) {
     }
 }
 
+/**
+ * Fetches characters from AICharacterCards based on specified search criteria.
+ * Text/tag/NSFW search goes through the generic listing endpoint; the "curated" sort
+ * options (most downloaded, top AI-rated, trending) have their own dedicated endpoints
+ * that ignore search/tag filters, matching how the site's own UI behaves.
+ * @param {Object} options - Search options: searchTerm, includeTags, page, first, sort, nsfwFilter.
+ * @returns {Promise<Array>} - Resolves with an array of normalized character objects.
+ */
+async function fetchAICCCharactersBySearch(options) {
+    const limit = options.first || extension_settings.chub.findCount || 30;
+    const page = options.page || 1;
+    const curatedEndpoints = {
+        most_downloaded: 'cards/most-downloaded',
+        top_ai_rated: 'cards/top-ai-rated',
+        trending: 'cards/trending',
+    };
+
+    const params = new URLSearchParams();
+    let endpoint;
+
+    if (curatedEndpoints[options.sort]) {
+        endpoint = curatedEndpoints[options.sort];
+        params.set('limit', String(limit));
+        if (options.nsfwFilter) params.set('nsfw', options.nsfwFilter);
+    } else {
+        endpoint = 'cards';
+        params.set('page', String(page));
+        params.set('limit', String(limit));
+        if (options.searchTerm) params.set('search', options.searchTerm);
+        if (Array.isArray(options.includeTags) && options.includeTags.length > 0) {
+            params.set('tags', options.includeTags.join(','));
+        }
+        if (options.nsfwFilter === 'sfw') params.set('isNsfw', 'false');
+        if (options.nsfwFilter === 'nsfw') params.set('isNsfw', 'true');
+    }
+
+    const url = `${AICC_API_BASE}/${endpoint}?${params.toString()}`;
+    console.log("Fetching AICharacterCards:", url);
+
+    try {
+        const searchResponse = await ctFetch(url, { headers: { 'Accept': 'application/json' } });
+
+        if (!searchResponse.ok) {
+            console.error('AICharacterCards API request failed:', searchResponse.status, searchResponse.statusText);
+            toastr.error(`AICharacterCards search failed: ${searchResponse.statusText}`, "API Error");
+            return [];
+        }
+
+        const searchData = await searchResponse.json();
+        const cards = searchData.data || [];
+
+        aiccCharacters = cards.map(card => {
+            let imageUrl = card.imageUrl ? `${AICC_FILE_BASE}${card.imageUrl}` : `${extensionFolderPath}placeholder.png`;
+            if (card.isAnimated && card.imageUrl) {
+                imageUrl = `${AICC_FILE_BASE}${card.imageUrl.replace(/-opt\.webp$/i, '.png')}`;
+            }
+            return {
+                url: imageUrl,
+                description: card.excerpt || card.description || "No description.",
+                name: card.title || "Unnamed Character",
+                id: card.id,
+                tags: Array.isArray(card.tags) ? card.tags.map(t => t.name || t) : [],
+                author: card.author || "Unknown Author",
+                downloads: card.downloadCount,
+                aiScore: card.aiScore,
+            };
+        });
+
+        return aiccCharacters;
+
+    } catch (error) {
+        console.error("Error during AICharacterCards search fetch:", error);
+        if (error?.message === 'CORS_PROXY_DISABLED') {
+            toastr.error('Enable "enableCorsProxy" in config.yaml (or start with --corsProxy) to use AICharacterCards.', 'CORS proxy disabled', { timeOut: 8000 });
+        } else {
+            toastr.error("An error occurred while searching AICharacterCards.", "Fetch Error");
+        }
+        return [];
+    }
+}
+
 
 /**
  * Searches for characters based on the provided options and manages the UI during the search.
@@ -591,7 +723,11 @@ async function searchCharacters(options, source) {
         characterListContainer.classList.add('searching');
     }
     console.log('Searching for characters with options:', options);
-    const characters = source === 'ct' ? await fetchCTCharactersBySearch(options) : await fetchCharactersBySearch(options);
+    const fetchers = {
+        ct: fetchCTCharactersBySearch,
+        aicc: fetchAICCCharactersBySearch,
+    };
+    const characters = await (fetchers[source] || fetchCharactersBySearch)(options);
     if (characterListContainer) {
         characterListContainer.classList.remove('searching');
     }
@@ -647,25 +783,38 @@ function generateCharacterListItem(character, index, source = 'chub') {
     const imageUrl = character.url && character.url !== `${extensionFolderPath}placeholder.png` ? character.url : `${extensionFolderPath}placeholder.png`;
     const placeholderImg = `${extensionFolderPath}placeholder.png`; // Define placeholder path
 
-    const characterPageUrl = source === 'ct'
-        ? `https://character-tavern.com/character/${character.fullPath}`
-        : `https://chub.ai/characters/${character.fullPath}`;
-    const authorPageUrl = source === 'ct'
-        ? `https://character-tavern.com/creator/${character.author}`
-        : `https://chub.ai/users/${character.author}`;
-    const siteLabel = source === 'ct' ? 'Character Tavern' : 'Chub.ai';
-    const downloadAttrs = source === 'ct'
-        ? `data-source="ct" data-id="${character.id}" data-path="${character.fullPath}"`
-        : `data-source="chub" data-path="${character.fullPath}"`;
+    const sourceMeta = {
+        chub: {
+            label: 'Chub.ai',
+            characterPageUrl: `https://chub.ai/characters/${character.fullPath}`,
+            authorPageUrl: `https://chub.ai/users/${character.author}`,
+            downloadAttrs: `data-source="chub" data-path="${character.fullPath}"`,
+        },
+        ct: {
+            label: 'Character Tavern',
+            characterPageUrl: `https://character-tavern.com/character/${character.fullPath}`,
+            authorPageUrl: `https://character-tavern.com/creator/${character.author}`,
+            downloadAttrs: `data-source="ct" data-id="${character.id}" data-path="${character.fullPath}"`,
+        },
+        aicc: {
+            label: 'AICharacterCards',
+            characterPageUrl: `https://aicharactercards.com/cards/${character.id}`,
+            authorPageUrl: null, // No known author profile URL scheme; shown as plain text instead.
+            downloadAttrs: `data-source="aicc" data-id="${character.id}" data-name="${character.name}"`,
+        },
+    };
+    const { label: siteLabel, characterPageUrl, authorPageUrl, downloadAttrs } = sourceMeta[source] || sourceMeta.chub;
+
+    const authorHtml = authorPageUrl
+        ? `<a href="${authorPageUrl}" target="_blank" title="View author on ${siteLabel}: ${character.author}"><span class="chub-author">by ${character.author}</span></a>`
+        : `<span class="chub-author">by ${character.author}</span>`;
 
     return `
         <div class="chub-character-item" data-index="${index}">
             <img class="chub-thumbnail" src="${imageUrl}" onerror="this.onerror=null; this.src='${placeholderImg}';">
             <div class="chub-info">
                 <a href="${characterPageUrl}" target="_blank" title="View on ${siteLabel}: ${character.name}"><div class="chub-name">${character.name || "Default Name"}</div></a>
-                <a href="${authorPageUrl}" target="_blank" title="View author on ${siteLabel}: ${character.author}">
-                 <span class="chub-author">by ${character.author}</span>
-                </a>
+                ${authorHtml}
                 <div class="chub-description">${character.description}</div>
                 <div class="chub-tags">${character.tags.slice(0, 8).map(tag => `<span class="chub-tag">${tag}</span>`).join('')}</div>
             </div>
@@ -731,19 +880,30 @@ function createPopupLayout() {
         "most_chatted": "Most Chatted",
     };
 
+    const aiccReadableSortOptions = {
+        "": "Newest",
+        "most_downloaded": "Most Downloaded",
+        "top_ai_rated": "Top AI-Rated",
+        "trending": "Trending",
+    };
+
     const chubTab = activeSource === 'chub';
     const ctTab = activeSource === 'ct';
+    const aiccTab = activeSource === 'aicc';
+    const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters };
+    const activeCharacters = charactersBySource[activeSource] || [];
 
     return `
 <div class="chub-wrapper" id="list-and-search-wrapper">
     <div class="chub-source-tabs">
         <div class="chub-source-tab${chubTab ? ' active' : ''}" data-source-tab="chub">Chub</div>
         <div class="chub-source-tab${ctTab ? ' active' : ''}" data-source-tab="ct">Character Tavern</div>
+        <div class="chub-source-tab${aiccTab ? ' active' : ''}" data-source-tab="aicc">AICharacterCards</div>
     </div>
     <div class="chub-list-popup">
-        ${(activeSource === 'ct' ? ctCharacters : chubCharacters).map((character, index) => generateCharacterListItem(character, index, activeSource)).join('')}
+        ${activeCharacters.map((character, index) => generateCharacterListItem(character, index, activeSource)).join('')}
         <!-- Placeholder message when list is empty -->
-        ${(activeSource === 'ct' ? ctCharacters : chubCharacters).length === 0 ? '<div class="chub-no-characters-found">Perform a search to see characters.</div>' : ''}
+        ${activeCharacters.length === 0 ? '<div class="chub-no-characters-found">Perform a search to see characters.</div>' : ''}
     </div>
     <hr class="chub-hr">
 
@@ -846,6 +1006,49 @@ function createPopupLayout() {
         </div>
     </div>
     </div>
+
+    <div class="chub-source-panel" data-source-panel="aicc"${aiccTab ? '' : ' hidden'}>
+    <div class="search-container chub-search-container">
+        <div class="chub-search-grid">
+            ${createTextInput('aiccSearchInput', '<i class="fas fa-search"></i> Search', 'Search title, description...', '', 'Full-text search across title and description')}
+            ${createTextInput('aiccIncludeTags', '<i class="fas fa-plus-square"></i> Include tags', 'comma separated', '', 'Tags the character MUST have')}
+        </div>
+
+        <details class="chub-details">
+            <summary class="chub-summary">Filters</summary>
+            <div class="chub-filter-grid">
+                <div class="flex-container flex-no-wrap flex-align-center chub-filter-item">
+                    <label for="aiccNsfwFilter">NSFW:</label>
+                    <select class="margin0" id="aiccNsfwFilter">
+                        <option value="">Show All</option>
+                        <option value="sfw">SFW Only</option>
+                        <option value="nsfw">NSFW Only</option>
+                    </select>
+                </div>
+            </div>
+        </details>
+
+        <div class="chub-toolbar">
+            <div class="chub-toolbar-section chub-sort-controls">
+                <label for="aiccSortOrder">Sort:</label>
+                <select class="margin0" id="aiccSortOrder">
+                    ${Object.entries(aiccReadableSortOptions).map(([key, value]) => `<option value="${key}">${value}</option>`).join('')}
+                </select>
+                <label for="aiccResultsPerPage">Per Page:</label>
+                <input type="number" id="aiccResultsPerPage" class="text_pole textarea_compact" min="1" max="100" value="${currentSettings.findCount || 30}">
+            </div>
+            <div class="chub-toolbar-section page-buttons">
+                <button class="menu_button" id="aiccPageDownButton" title="Previous Page"><i class="fas fa-chevron-left"></i></button>
+                <label for="aiccPageNumber">Page:</label>
+                <input type="number" id="aiccPageNumber" class="text_pole textarea_compact" min="1" value="1">
+                <button class="menu_button" id="aiccPageUpButton" title="Next Page"><i class="fas fa-chevron-right"></i></button>
+            </div>
+            <div class="chub-toolbar-section chub-toolbar-search">
+                <div class="menu_button chub-search-button" id="aiccSearchButton"><i class="fas fa-search"></i> Search</div>
+            </div>
+        </div>
+    </div>
+    </div>
 </div>
 `;
 }
@@ -940,8 +1143,21 @@ async function displayCharactersInListViewPopup() {
          // Download button listener
         else if (event.target.classList.contains('chub-download-btn')) {
             event.stopPropagation(); // Prevent triggering other listeners
-            const fullPath = event.target.getAttribute('data-path');
             const source = event.target.getAttribute('data-source') || 'chub';
+
+            if (source === 'aicc') {
+                const id = event.target.getAttribute('data-id');
+                const name = event.target.getAttribute('data-name');
+                if (!id) {
+                    console.error("Download button missing data-id attribute");
+                    toastr.warning("Could not initiate download: character id missing.");
+                    return;
+                }
+                downloadAICCCharacter(id, name);
+                return;
+            }
+
+            const fullPath = event.target.getAttribute('data-path');
             if (!fullPath) {
                 console.error("Download button missing data-path attribute");
                 toastr.warning("Could not initiate download: character path missing.");
@@ -988,7 +1204,8 @@ async function displayCharactersInListViewPopup() {
                 panel.hidden = panel.getAttribute('data-source-panel') !== newSource;
             });
 
-            const currentCharacters = newSource === 'ct' ? ctCharacters : chubCharacters;
+            const charactersBySource = { chub: chubCharacters, ct: ctCharacters, aicc: aiccCharacters };
+            const currentCharacters = charactersBySource[newSource] || [];
             updateCharacterListInView(currentCharacters, newSource);
             if (currentCharacters.length === 0 && characterListContainer) {
                 characterListContainer.innerHTML = '<div class="chub-no-characters-found">Perform a search to see characters.</div>';
@@ -1254,6 +1471,96 @@ async function displayCharactersInListViewPopup() {
     if (ctSearchButton) ctSearchButton.addEventListener('click', handleCTSearch);
     if (ctPageUpButton) ctPageUpButton.addEventListener('click', handleCTSearch);
     if (ctPageDownButton) ctPageDownButton.addEventListener('click', handleCTSearch);
+
+    // --- AICharacterCards search inputs ---
+    const aiccSearchInputs = [
+        'aiccSearchInput', 'aiccIncludeTags', 'aiccNsfwFilter', 'aiccSortOrder', 'aiccResultsPerPage', 'aiccPageNumber',
+    ];
+
+    const aiccSearchButton = document.getElementById('aiccSearchButton');
+    const aiccPageUpButton = document.getElementById('aiccPageUpButton');
+    const aiccPageDownButton = document.getElementById('aiccPageDownButton');
+
+    const handleAICCSearch = async function (e) {
+        console.debug('handleAICCSearch triggered by:', e.target.id || e.type);
+
+        if (e.type === 'keyup' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+        if (e.type === 'keydown' && e.key !== 'Enter' && (e.target.type === 'text' || e.target.type === 'number')) {
+            return;
+        }
+
+        const getVal = (id) => document.getElementById(id)?.value;
+        const getInt = (id) => {
+            const val = getVal(id);
+            return val ? parseInt(val, 10) : null;
+        };
+        const splitAndTrim = (id) => {
+            const str = getVal(id);
+            if (!str) return [];
+            return str.split(',').map(tag => tag.trim()).filter(tag => tag);
+        };
+
+        let currentPage = getInt('aiccPageNumber') || 1;
+
+        if (e.target.id === 'aiccPageUpButton' || e.target.closest('#aiccPageUpButton')) {
+            currentPage++;
+        } else if (e.target.id === 'aiccPageDownButton' || e.target.closest('#aiccPageDownButton')) {
+            currentPage--;
+        }
+
+        currentPage = clamp(currentPage, 1, Number.MAX_SAFE_INTEGER);
+        if (document.getElementById('aiccPageNumber')) {
+            document.getElementById('aiccPageNumber').value = currentPage;
+        }
+
+        const options = {
+            searchTerm: getVal('aiccSearchInput'),
+            includeTags: splitAndTrim('aiccIncludeTags'),
+            nsfwFilter: getVal('aiccNsfwFilter'),
+            sort: getVal('aiccSortOrder'),
+            first: getInt('aiccResultsPerPage'),
+            page: currentPage,
+        };
+
+        if (e.target.id !== 'aiccPageNumber' && e.target.id !== 'aiccPageUpButton' && e.target.id !== 'aiccPageDownButton' && !e.target.closest('#aiccPageUpButton') && !e.target.closest('#aiccPageDownButton')) {
+            options.page = 1;
+            if (document.getElementById('aiccPageNumber')) {
+                document.getElementById('aiccPageNumber').value = 1;
+            }
+        }
+
+        executeCharacterSearchDebounced(options, 'aicc');
+
+        if (document.getElementById('aiccResultsPerPage') && options.first) {
+            extension_settings.chub.findCount = options.first;
+        }
+    };
+
+    aiccSearchInputs.forEach(inputId => {
+        const element = document.getElementById(inputId);
+        if (element) {
+            const eventType = (element.type === 'checkbox' || element.tagName === 'SELECT') ? 'change' : 'keyup';
+            element.addEventListener(eventType, handleAICCSearch);
+            if (element.type === 'number') {
+                element.addEventListener('change', handleAICCSearch);
+            }
+            if (element.type === 'text') {
+                element.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        handleAICCSearch(e);
+                    }
+                });
+            }
+        } else {
+            console.warn(`Element with ID ${inputId} not found for event listener.`);
+        }
+    });
+
+    if (aiccSearchButton) aiccSearchButton.addEventListener('click', handleAICCSearch);
+    if (aiccPageUpButton) aiccPageUpButton.addEventListener('click', handleAICCSearch);
+    if (aiccPageDownButton) aiccPageDownButton.addEventListener('click', handleAICCSearch);
 
     // Trigger initial search if desired (optional)
     // handleSearch({ target: { id: 'initial-load' } }); // Uncomment to search on open
