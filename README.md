@@ -1,9 +1,6 @@
 # CHUB-SEARCH becomes MULTI-CHAR-CARD SEARCH
 
-## What does that mean?
-
-# Working, reworked to enable all blacklisted cards.
-## What new? (old)
+## What's new? (old)
 - 30 char cards on one page
 - fix page switching
 - fix cards download (thanks for this, fork "Fixed-SillyTavern-Chub-Search")
